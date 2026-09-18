@@ -53,13 +53,14 @@ See [coverage and verification](verification/powershell-parity.md) for precise b
 [PowerShell parity Actions](https://github.com/samo33ddd/codex/actions/workflows/powershell-parity.yml) produces a candidate ZIP after the Windows checks pass. Candidates are not automatically published as releases or declared desktop-compatible. There is no automatic updater.
 
 1. Download and extract a candidate artifact. It includes SHA-256 checksums, a build manifest, the launcher, three locally built executables, and the pinned official `codex-code-mode-host.exe`.
-2. In PowerShell 7, validate the installed desktop and the extracted components:
+2. From a checkout of this repository, [prepare a local desktop bundle](#local-desktop-bundle-and-git-labels). Pass the extracted candidate directory as `--backend-dir`. Preparation registers the desktop beside the candidate launcher.
+3. In PowerShell 7, validate the prepared desktop and components from the extracted candidate directory:
 
    ```powershell
    .\Start-Codex.ps1 -ValidateOnly
    ```
 
-3. Save your work and close Codex yourself. Then run:
+4. Save your work and close Codex yourself. Then run:
 
    ```powershell
    .\Start-Codex.ps1
@@ -67,7 +68,7 @@ See [coverage and verification](verification/powershell-parity.md) for precise b
 
 The launcher sets `CODEX_CLI_PATH` only for the new process and checks the actual backend process path. It does not close an existing session or edit account credentials, providers, models, global environment variables, WindowsApps, or app.asar.
 
-The native Windows bootstrap can lose the backend environment override on the normal profile. For startup that does not depend on that override, use the local desktop bundle below: it includes the verified custom backend in its own resources. The launcher passes `--user-data-dir` explicitly and validates the actual backend even if the initial process exits. On failure, the error includes the expected path, observed backend paths and application log directory.
+The native Windows bootstrap can lose the backend environment override on the normal profile. The launcher therefore uses a prepared desktop bundle with the verified custom backend in its own resources. It reads `desktop-bundle.json` beside the backend package, or uses an explicit `-DesktopPath`. Without a registered bundle, it stops before launching the stock app. The launcher passes `--user-data-dir` explicitly and validates the actual backend even if the initial process exits. On failure, the error includes the expected path, observed backend paths and application log directory.
 
 **Rollback:** close this instance and start Codex from its usual Start-menu shortcut. The stock installation is unchanged.
 
@@ -82,10 +83,10 @@ $app = (Get-AppxPackage -Name OpenAI.Codex).InstallLocation + '\app'
 python scripts/powershell-parity/prepare_desktop.py --source-app $app --backend-dir artifacts/powershell-parity --output artifacts/git-desktop/app
 
 # After closing Codex:
-pwsh -NoProfile -File scripts/powershell-parity/Start-Codex.ps1 -DesktopPath artifacts/git-desktop/app/ChatGPT.exe
+pwsh -NoProfile -File scripts/powershell-parity/Start-Codex.ps1
 ```
 
-Preparation requires a new output directory and checks the exact SHA-256 of the three supported UI assets and each backend component against the backend build manifest. It records the component hashes, changed asset hashes and both ASAR hashes in `desktop-patch-manifest.json`. The launcher verifies this manifest before starting, and checks that the running backend is a verified component. The installed desktop is not modified. A desktop update requires a new compatibility review; this is a local bundle, not an official plugin or a redistributable desktop build.
+Preparation requires a new output directory and checks the exact SHA-256 of the three supported UI assets and each backend component against the backend build manifest. It records the component hashes, changed asset hashes and both ASAR hashes in `desktop-patch-manifest.json`. After successful preparation it atomically writes `desktop-bundle.json` in the backend directory, selecting the new bundle for ordinary launches. The launcher verifies the desktop manifest before starting, and checks that the running backend is a verified component. The installed desktop is not modified. A desktop update requires a new compatibility review; this is a local bundle, not an official plugin or a redistributable desktop build.
 
 `-UserDataPath` provides a separate native browser and Electron profile for testing. Ordinary launches retain the normal profile. Local verification uses `test_launcher.ps1`, `test_prepare_desktop.py` and `test_desktop_git_labels.cjs`; the latter requires the matching assets extracted under `.local/desktop`.
 

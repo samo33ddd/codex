@@ -177,6 +177,13 @@ def prepare(source, output, backend_dir):
     (output / "desktop-patch-manifest.json").write_text(
         json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
     )
+    registration = backend_dir / "desktop-bundle.json"
+    with tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", dir=backend_dir, delete=False
+    ) as temporary:
+        json.dump({"desktopPath": str(output / "ChatGPT.exe")}, temporary, indent=2)
+        temporary.write("\n")
+    Path(temporary.name).replace(registration)
     return manifest
 
 

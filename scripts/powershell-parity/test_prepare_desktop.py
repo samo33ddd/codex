@@ -1,14 +1,87 @@
 import hashlib
 import json
+import struct
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from prepare_desktop import BACKEND_FILES, HERE, verified_backend_files
+from prepare_desktop import BACKEND_FILES, HERE, prepare, verified_backend_files
 
 
 class DesktopBackendTests(unittest.TestCase):
+    def test_successful_preparation_registers_latest_bundle_for_default_launcher(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            source, backend = root / "installed", root / "backend"
+            (source / "resources").mkdir(parents=True)
+            backend.mkdir()
+            (source / "ChatGPT.exe").write_bytes(b"desktop fixture")
+            (backend / "codex.exe").write_bytes(b"custom backend fixture")
+            files = [
+                {
+                    "file": "codex.exe",
+                    "sha256": hashlib.sha256(b"custom backend fixture").hexdigest(),
+                }
+            ]
+            header = {
+                "files": {
+                    "webview": {
+                        "files": {
+                            "assets": {
+                                "files": {"fixture.js": {"offset": "0", "size": 8}}
+                            }
+                        }
+                    }
+                }
+            }
+            encoded = json.dumps(header).encode()
+            payload = struct.pack("<I", len(encoded)) + encoded
+            payload += b"\0" * (-len(payload) % 4)
+            archive = (
+                struct.pack("<III", 4, len(payload) + 4, len(payload))
+                + payload
+                + b"original"
+            )
+            (source / "resources/app.asar").write_bytes(archive)
+
+            def patch_assets(command, *, check):
+                original, patched = Path(command[-2]), Path(command[-1])
+                self.assertEqual((original / "fixture.js").read_bytes(), b"original")
+                patched.mkdir()
+                (patched / "fixture.js").write_bytes(b"patched")
+                (patched / "desktop_git_labels_manifest.json").write_text(
+                    '{"files": []}'
+                )
+
+            registration = backend / "desktop-bundle.json"
+            with (
+                patch(
+                    "prepare_desktop.verified_backend_files",
+                    return_value={"files": files},
+                ),
+                patch(
+                    "prepare_desktop.subprocess.check_output",
+                    return_value='["fixture.js"]',
+                ),
+                patch("prepare_desktop.subprocess.run", side_effect=patch_assets),
+            ):
+                for name in ("first bundle", "second bundle"):
+                    output = root / name
+                    prepare(source, output, backend)
+                    self.assertEqual(
+                        json.loads(registration.read_text()),
+                        {"desktopPath": str(output / "ChatGPT.exe")},
+                    )
+                    self.assertTrue((output / "desktop-patch-manifest.json").is_file())
+                with self.assertRaisesRegex(ValueError, "new output directory"):
+                    prepare(source, source, backend)
+                self.assertEqual(
+                    json.loads(registration.read_text()),
+                    {"desktopPath": str(root / "second bundle/ChatGPT.exe")},
+                )
+            self.assertEqual((source / "resources/app.asar").read_bytes(), archive)
+
     def test_bundle_verifies_every_component_before_using_it(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

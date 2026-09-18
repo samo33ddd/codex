@@ -8,21 +8,28 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $compatibility = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'compatibility.json') -Raw | ConvertFrom-Json
-$bundledBackend = $null
-if ($DesktopPath) {
-    $desktop = (Resolve-Path -LiteralPath $DesktopPath).Path
-    $bundledBackend = Join-Path (Split-Path $desktop) 'resources\codex.exe'
-}
 if ($BackendPath) {
     $backend = [System.IO.Path]::GetFullPath($BackendPath)
-} elseif ($bundledBackend) {
-    $backend = $bundledBackend
 } elseif (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'codex.exe')) {
     $backend = Join-Path $PSScriptRoot 'codex.exe'
 } else {
     $repo = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')).Path
     $backend = Join-Path $repo 'artifacts\powershell-parity\codex.exe'
 }
+if (-not $DesktopPath) {
+    $registrationPath = Join-Path (Split-Path $backend) 'desktop-bundle.json'
+    if (-not (Test-Path -LiteralPath $registrationPath -PathType Leaf)) {
+        throw 'Prepared desktop is missing. Run prepare_desktop.py with --backend-dir pointing to this backend directory, or pass -DesktopPath to a verified desktop bundle.'
+    }
+    $registration = Get-Content -LiteralPath $registrationPath -Raw | ConvertFrom-Json
+    $DesktopPath = $registration.desktopPath
+    if ([string]::IsNullOrWhiteSpace($DesktopPath)) {
+        throw "Missing desktopPath in registration: $registrationPath"
+    }
+}
+$desktop = (Resolve-Path -LiteralPath $DesktopPath).Path
+$bundledBackend = Join-Path (Split-Path $desktop) 'resources\codex.exe'
+if (-not $BackendPath) { $backend = $bundledBackend }
 if (-not (Test-Path -LiteralPath $backend -PathType Leaf)) {
     throw "Build is missing: $backend"
 }

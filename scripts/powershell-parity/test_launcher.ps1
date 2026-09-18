@@ -3,7 +3,11 @@ $fixtureRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('codex-launcher-test
 New-Item -ItemType Directory -Path $fixtureRoot -Force | Out-Null
 $version = (Get-Content -LiteralPath (Join-Path $PSScriptRoot 'compatibility.json') -Raw | ConvertFrom-Json)
 $backend = Join-Path $fixtureRoot 'backend.ps1'
+$launcher = Join-Path $fixtureRoot 'Start-Codex.ps1'
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Start-Codex.ps1') -Destination $launcher
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'compatibility.json') -Destination $fixtureRoot
 Set-Content -LiteralPath $backend -Value ("'codex-cli " + $version.backendVersion + "'`n" + '$global:LASTEXITCODE = 0')
+Copy-Item -LiteralPath $backend -Destination (Join-Path $fixtureRoot 'codex.exe')
 foreach ($name in @('codex-command-runner.exe', 'codex-windows-sandbox-setup.exe', 'codex-code-mode-host.exe')) {
     New-Item -ItemType File -Path (Join-Path $fixtureRoot $name) | Out-Null
 }
@@ -26,38 +30,13 @@ function Get-CimInstance {
 function Start-Process {
     param($FilePath, $ArgumentList, $Environment, [switch]$PassThru)
     $global:LauncherFixture.Started++
+    $global:LauncherFixture.Desktop = $FilePath
     $global:LauncherFixture.Arguments = $ArgumentList
     $global:LauncherFixture.Environment = $Environment
     [pscustomobject]@{ Id = 42; HasExited = $true }
 }
 function Start-Sleep { param($Milliseconds) }
 try {
-    $before = $env:CODEX_CLI_PATH
-    $result = & (Join-Path $PSScriptRoot 'Start-Codex.ps1') -BackendPath $backend
-    $normalProfile = Join-Path ([Environment]::GetFolderPath('ApplicationData')) 'Codex\web\Codex'
-    if ($global:LauncherFixture.Arguments -ne ('--user-data-dir="' + $normalProfile + '"')) { throw 'Native profile was not passed explicitly.' }
-    if ($result.ProcessId -ne 43 -or $global:LauncherFixture.Queries -ne 3) { throw 'Backend was not observed after launcher exit.' }
-    if ($global:LauncherFixture.Environment.CODEX_CLI_PATH -ne $backend -or $env:CODEX_CLI_PATH -ne $before) { throw 'Backend override escaped the child environment.' }
-    if ($global:LauncherFixture.Environment.ContainsKey('CODEX_ELECTRON_USER_DATA_PATH')) { throw 'Normal Electron profile must be preserved.' }
-    Write-Host 'PASS: native profile, delayed child, process-local override'
-
-    $global:LauncherFixture.Queries = 0
-    $isolated = Join-Path $fixtureRoot 'profile with [brackets]'
-    $null = & (Join-Path $PSScriptRoot 'Start-Codex.ps1') -BackendPath $backend -UserDataPath $isolated
-    if ($global:LauncherFixture.Environment.CODEX_ELECTRON_USER_DATA_PATH -ne $isolated) { throw 'Isolated Electron profile was not set.' }
-    Write-Host 'PASS: isolated native and Electron profiles'
-
-    $global:LauncherFixture.Running = [pscustomobject]@{ ExecutablePath = (Join-Path $fixtureRoot 'app\ChatGPT.exe'); CommandLine = ('ChatGPT.exe --user-data-dir="' + $isolated + '"') }
-    $starts = $global:LauncherFixture.Started
-    try {
-        $null = & (Join-Path $PSScriptRoot 'Start-Codex.ps1') -BackendPath $backend -UserDataPath $isolated
-        throw 'Expected running-profile rejection.'
-    } catch {
-        if ($_.Exception.Message -notlike 'Save your work*') { throw }
-    }
-    if ($global:LauncherFixture.Started -ne $starts) { throw 'Already running profile was launched again.' }
-    Write-Host 'PASS: running profile rejected without launching or terminating it'
-
     $installedApp = Join-Path $fixtureRoot 'app\ChatGPT.exe'
     $preparedApp = Join-Path $fixtureRoot 'prepared\ChatGPT.exe'
     $preparedResources = Join-Path $fixtureRoot 'prepared\resources'
@@ -75,17 +54,75 @@ try {
         backend = @{ version = $version.backendVersion; files = @($entries) }
         patchedAsarSha256 = (Get-FileHash -LiteralPath $archive).Hash
     } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path (Split-Path $preparedApp) 'desktop-patch-manifest.json')
+    $fixtureVersion = $version.backendVersion
+    $versionCommand = { "codex-cli $fixtureVersion"; $global:LASTEXITCODE = 0 }.GetNewClosure()
+    Set-Item -LiteralPath ('Function:\global:' + (Join-Path $fixtureRoot 'codex.exe')) -Value $versionCommand
+    Set-Item -LiteralPath ('Function:\global:' + (Join-Path $preparedResources 'codex.exe')) -Value $versionCommand
+    try {
+        $null = & $launcher
+        throw 'Expected missing desktop registration rejection.'
+    } catch {
+        if ($_.Exception.Message -notlike 'Prepared desktop is missing*') { throw }
+    }
+    if ($global:LauncherFixture.Started -ne 0) { throw 'Unprepared launch started the stock desktop.' }
+    Write-Host 'PASS: unprepared default launch is rejected before starting the stock app'
+    $registration = Join-Path $fixtureRoot 'desktop-bundle.json'
+    @{ desktopPath = $preparedApp } | ConvertTo-Json | Set-Content -LiteralPath $registration
+    $global:LauncherFixture.Backend = Join-Path $preparedResources 'codex.exe'
+    $validated = & $launcher -ValidateOnly
+    if ($validated.DesktopPath -ne $preparedApp -or $validated.BackendPath -ne $global:LauncherFixture.Backend) { throw 'Default validation did not select the registered bundle.' }
+    $result = & $launcher
+    if ($result.ExecutablePath -ne $global:LauncherFixture.Backend -or $global:LauncherFixture.Desktop -ne $preparedApp) { throw 'Default launch did not start the registered bundle.' }
+    if ($global:LauncherFixture.Environment.CODEX_CLI_PATH -ne $global:LauncherFixture.Backend) { throw 'Default launch did not select the bundled backend.' }
+    Write-Host 'PASS: no-argument validation and launch select the registered desktop and backend'
+    $global:LauncherFixture.Queries = 0
+    $before = $env:CODEX_CLI_PATH
+    $result = & $launcher -BackendPath $backend
+    $normalProfile = Join-Path ([Environment]::GetFolderPath('ApplicationData')) 'Codex\web\Codex'
+    if ($global:LauncherFixture.Arguments -ne ('--user-data-dir="' + $normalProfile + '"')) { throw 'Native profile was not passed explicitly.' }
+    if ($result.ProcessId -ne 43 -or $global:LauncherFixture.Queries -ne 3) { throw 'Backend was not observed after launcher exit.' }
+    if ($global:LauncherFixture.Environment.CODEX_CLI_PATH -ne $backend -or $env:CODEX_CLI_PATH -ne $before) { throw 'Backend override escaped the child environment.' }
+    if ($global:LauncherFixture.Environment.ContainsKey('CODEX_ELECTRON_USER_DATA_PATH')) { throw 'Normal Electron profile must be preserved.' }
+    Write-Host 'PASS: native profile, delayed child, process-local override'
+
+    $global:LauncherFixture.Queries = 0
+    $isolated = Join-Path $fixtureRoot 'profile with [brackets]'
+    $null = & $launcher -BackendPath $backend -UserDataPath $isolated
+    if ($global:LauncherFixture.Environment.CODEX_ELECTRON_USER_DATA_PATH -ne $isolated) { throw 'Isolated Electron profile was not set.' }
+    Write-Host 'PASS: isolated native and Electron profiles'
+
+    $global:LauncherFixture.Running = [pscustomobject]@{ ExecutablePath = (Join-Path $fixtureRoot 'app\ChatGPT.exe'); CommandLine = ('ChatGPT.exe --user-data-dir="' + $isolated + '"') }
+    $starts = $global:LauncherFixture.Started
+    try {
+        $null = & $launcher -BackendPath $backend -UserDataPath $isolated
+        throw 'Expected running-profile rejection.'
+    } catch {
+        if ($_.Exception.Message -notlike 'Save your work*') { throw }
+    }
+    if ($global:LauncherFixture.Started -ne $starts) { throw 'Already running profile was launched again.' }
+    Write-Host 'PASS: running profile rejected without launching or terminating it'
+
+    @{ desktopPath = '' } | ConvertTo-Json | Set-Content -LiteralPath $registration
+    try {
+        $null = & $launcher
+        throw 'Expected invalid desktop registration rejection.'
+    } catch {
+        if ($_.Exception.Message -notlike 'Missing desktopPath in registration*') { throw }
+    }
+    if ($global:LauncherFixture.Started -ne $starts) { throw 'Invalid registration started the stock desktop.' }
+    Write-Host 'PASS: invalid registration is rejected without fallback to the stock app'
+
     $global:LauncherFixture.Running = $null
     $global:LauncherFixture.Queries = 0
     $global:LauncherFixture.Backend = Join-Path $preparedResources 'codex.exe'
-    $result = & (Join-Path $PSScriptRoot 'Start-Codex.ps1') -BackendPath $backend -DesktopPath $preparedApp -UserDataPath $isolated
+    $result = & $launcher -BackendPath $backend -DesktopPath $preparedApp -UserDataPath $isolated
     if ($result.ExecutablePath -ne $global:LauncherFixture.Backend) { throw 'Verified bundled backend fallback was not recognized.' }
-    Write-Host 'PASS: desktop uses verified bundled backend when the environment override is lost'
+    Write-Host 'PASS: explicit desktop overrides registration and recognizes its verified backend'
 
     $global:LauncherFixture.Running = [pscustomobject]@{ ExecutablePath = (Join-Path $fixtureRoot 'older-copy\ChatGPT.exe'); CommandLine = ('ChatGPT.exe --user-data-dir="' + $isolated + '"') }
     $starts = $global:LauncherFixture.Started
     try {
-        $null = & (Join-Path $PSScriptRoot 'Start-Codex.ps1') -BackendPath $backend -DesktopPath $preparedApp -UserDataPath $isolated
+        $null = & $launcher -BackendPath $backend -DesktopPath $preparedApp -UserDataPath $isolated
         throw 'Expected other-copy profile rejection.'
     } catch {
         if ($_.Exception.Message -notlike 'Save your work*') { throw }
@@ -96,7 +133,7 @@ try {
     $global:LauncherFixture.Running = $null
     Set-Content -LiteralPath (Join-Path $preparedResources 'codex.exe') -Value 'stock backend substituted'
     try {
-        $null = & (Join-Path $PSScriptRoot 'Start-Codex.ps1') -BackendPath $backend -DesktopPath $preparedApp -UserDataPath $isolated
+        $null = & $launcher -BackendPath $backend -DesktopPath $preparedApp -UserDataPath $isolated
         throw 'Expected substituted backend rejection.'
     } catch {
         if ($_.Exception.Message -notlike 'Custom backend component does not match*') { throw }
@@ -104,6 +141,7 @@ try {
     if ($global:LauncherFixture.Started -ne $starts) { throw 'A substituted backend was launched.' }
     Write-Host 'PASS: stock backend substitution is rejected before launching'
 } finally {
+    Remove-Item -LiteralPath ('Function:\' + (Join-Path $fixtureRoot 'codex.exe')), ('Function:\' + (Join-Path $preparedResources 'codex.exe')) -ErrorAction SilentlyContinue
     $resolvedFixture = [System.IO.Path]::GetFullPath($fixtureRoot)
     $temporaryRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath())
     if ($resolvedFixture.StartsWith($temporaryRoot, [StringComparison]::OrdinalIgnoreCase) -and (Split-Path $resolvedFixture -Leaf).StartsWith('codex-launcher-test-')) {
