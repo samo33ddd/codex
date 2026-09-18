@@ -1,16 +1,21 @@
-"""Build a local desktop copy with version-pinned Git activity labels."""
+"""Build a local desktop with Git activity labels and its verified custom backend."""
 
 import argparse
 import hashlib
 import json
-from pathlib import Path
 import shutil
 import struct
 import subprocess
 import tempfile
-
+from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+BACKEND_FILES = (
+    "codex.exe",
+    "codex-command-runner.exe",
+    "codex-windows-sandbox-setup.exe",
+    "codex-code-mode-host.exe",
+)
 
 
 def digest(path):
@@ -19,6 +24,29 @@ def digest(path):
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             result.update(chunk)
     return result.hexdigest()
+
+
+def verified_backend_files(backend_dir):
+    manifest = json.loads((backend_dir / "manifest.json").read_text(encoding="utf-8"))
+    expected = {entry["file"]: entry for entry in manifest["files"]}
+    files = []
+    for name in BACKEND_FILES:
+        path = backend_dir / name
+        actual_hash = digest(path)
+        if name not in expected or actual_hash != expected[name]["sha256"]:
+            raise ValueError(f"Backend manifest SHA-256 mismatch: {name}")
+        files.append(
+            {"file": name, "bytes": path.stat().st_size, "sha256": actual_hash}
+        )
+    compatibility = json.loads(
+        (HERE / "compatibility.json").read_text(encoding="utf-8")
+    )
+    version = subprocess.check_output(
+        [str(backend_dir / "codex.exe"), "--version"], text=True
+    ).strip()
+    if version != f"codex-cli {compatibility['backendVersion']}":
+        raise ValueError(f"Unexpected backend version: {version}")
+    return {"version": compatibility["backendVersion"], "files": files}
 
 
 def archive_header(path):
@@ -90,10 +118,12 @@ def rewrite_archive(source, destination, replacements):
                     remaining -= len(chunk)
 
 
-def prepare(source, output):
+def prepare(source, output, backend_dir):
     source, output = source.resolve(), output.resolve()
     if output.exists() or source == output or source in output.parents:
         raise ValueError("Use a new output directory outside the installed application")
+    backend_dir = backend_dir.resolve()
+    backend = verified_backend_files(backend_dir)
     archive = source / "resources/app.asar"
     source_hash = digest(archive)
     patcher = HERE / "desktop_git_labels.cjs"
@@ -125,6 +155,11 @@ def prepare(source, output):
         }
         print(f"Copying desktop to {output}", flush=True)
         shutil.copytree(source, output)
+        for entry in backend["files"]:
+            destination = output / "resources" / entry["file"]
+            shutil.copyfile(backend_dir / entry["file"], destination)
+            if digest(destination) != entry["sha256"]:
+                raise ValueError(f"Copied backend SHA-256 mismatch: {entry['file']}")
         new_archive = output / "resources/app.asar.new"
         rewrite_archive(archive, new_archive, replacements)
         new_archive.replace(output / "resources/app.asar")
@@ -136,7 +171,8 @@ def prepare(source, output):
         "patchedAsarSha256": digest(output / "resources/app.asar"),
         "executableSha256": digest(output / "ChatGPT.exe"),
         "assets": changes["files"],
-        "scope": "Local presentation overlay; installed application is unchanged",
+        "backend": backend,
+        "scope": "Local desktop and backend bundle; installed application is unchanged",
     }
     (output / "desktop-patch-manifest.json").write_text(
         json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
@@ -148,5 +184,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-app", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--backend-dir", type=Path, required=True)
     args = parser.parse_args()
-    print(json.dumps(prepare(args.source_app, args.output), indent=2))
+    print(json.dumps(prepare(args.source_app, args.output, args.backend_dir), indent=2))

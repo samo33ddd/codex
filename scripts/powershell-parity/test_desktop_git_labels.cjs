@@ -12,23 +12,40 @@ const accepted = [
   ['git diff --stat', 'diff'],
   ['git diff --name-only', 'diff'],
   ['git log -n 5 --oneline', 'log'],
+  ['git log -3 --oneline', 'log'],
   ['git show HEAD --stat', 'show'],
+  ['git branch --show-current', 'branch'],
+  ['git remote -v', 'remote'],
+  ["git rev-parse --abbrev-ref --symbolic-full-name '@{u}'", 'rev-parse'],
+  ['git ls-remote --heads origin powershell-action-parity', 'ls-remote'],
+  ['git -C E:\\projects\\repo -c core.safecrlf=false diff --check', 'diff'],
+  ['git status --short; git branch --show-current; git remote -v; git log -3 --oneline', 'git_commands'],
+  ['git -c core.safecrlf=false diff --check; git -c core.safecrlf=false diff --stat', 'git_commands'],
+  ["git rev-parse --abbrev-ref --symbolic-full-name '@{u}'; git ls-remote --heads origin powershell-action-parity", 'git_commands'],
+  ['git status --short\ngit branch --show-current\ngit remote -v\ngit log -3 --oneline', 'git_commands'],
+  ["git -c core.safecrlf=false diff --check; Get-Content -LiteralPath 'E:\\projects\\codex-powershell-ui\\scripts\\powershell-parity\\test_desktop_git_labels.cjs'", 'git_and_other'],
+  ['git status --short\nrg -n TODO README.md', 'git_and_other'],
+  ["git status; Get-Content -LiteralPath 'git diff; Remove-Item x'", 'git_and_other'],
 ];
 for (const [command, operation] of accepted) assert.equal(gitOperation(command), operation, command);
 
 const rejected = [
-  'git status --short\nrg TODO src',
   'git status; Remove-Item x',
+  'git status; git push',
   'git diff | cat',
   'git diff --output=patch.txt',
   'git diff --ext-diff',
   'git show --format=%B HEAD',
   'git log --max-count=0',
-  'git -C project status',
+  'git -c alias.x=!rm status',
   'pwsh -Command git status',
   'git push',
   'git status > status.txt',
   'git status $(Remove-Item x)',
+  'git status && git diff',
+  'git status;',
+  "'git status; git diff'",
+  'git status; Get-Content "$env:TEMP"',
 ];
 for (const command of rejected) assert.equal(gitOperation(command), null, command);
 
@@ -38,6 +55,8 @@ assert.equal(gitLabel('diff', true), 'Просмотрены изменения 
 globalThis.document.documentElement.lang = 'en-US';
 assert.equal(gitLabel('log'), 'Inspecting Git history');
 assert.equal(gitLabel('show', true), 'Inspected Git object');
+assert.equal(gitLabel('git_commands', true), 'Ran Git commands');
+assert.equal(gitLabel('git_and_other'), 'Running Git and other commands');
 
 const base = path.resolve(__dirname, '../../.local/desktop');
 const source = Object.fromEntries(Object.values(files).map(name =>
@@ -84,7 +103,9 @@ assert.equal(active(item('git status --short', 'inProgress')).message.defaultMes
 assert.equal(active(item('git status --short', 'completed', 0)).message.defaultMessage,
   'Inspected Git status');
 assert.equal(active(item('git status --short', 'failed', 1)).message, 'ran detail');
-assert.equal(active(item('git status --short\nrg TODO', 'completed', 0)).message, 'ran detail');
+assert.equal(active(item('git status --short\nrg TODO', 'completed', 0)).message.defaultMessage,
+  'Ran Git and other commands');
+assert.equal(active(item('git status; git push', 'completed', 0)).message, 'ran detail');
 
 const row = isolatedFunction(patched[files.row], 'VC', {
   globalThis: {document: {documentElement: {lang: 'ru'}}},
@@ -102,9 +123,13 @@ assert.equal(row(rowProps('inProgress')).props.children, 'Просматрива
 const completedRow = rowProps('completed');
 completedRow.isFinishedBackgroundTerminal = true; // Actual completed item retains processId.
 assert.equal(row(completedRow).props.children, 'Просмотрены изменения Git');
+assert.equal(row(rowProps('completed', 'git status; git branch --show-current')).props.children,
+  'Выполнены команды Git');
+assert.equal(row(rowProps('completed', 'git status\nrg TODO')).props.children,
+  'Выполнены Git и другие команды');
 assert.notEqual(row(rowProps('failed')).props.children, 'Просмотрены изменения Git');
-assert.notEqual(row(rowProps('completed', 'git status\nrg TODO')).props.children,
-  'Проверено состояние Git');
+assert.notEqual(row(rowProps('failed', 'git status; git branch')).props.children,
+  'Выполнены команды Git');
 
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-git-labels-'));
 try {

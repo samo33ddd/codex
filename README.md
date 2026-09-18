@@ -67,27 +67,27 @@ See [coverage and verification](verification/powershell-parity.md) for precise b
 
 The launcher sets `CODEX_CLI_PATH` only for the new process and checks the actual backend process path. It does not close an existing session or edit account credentials, providers, models, global environment variables, WindowsApps, or app.asar.
 
-It passes the normal native browser profile explicitly through `--user-data-dir` so the Windows browser bootstrap preserves the backend override. Validation continues if the initial launcher process exits before its backend appears. On failure, the error includes the expected path, observed backend paths and application log directory.
+The native Windows bootstrap can lose the backend environment override on the normal profile. For startup that does not depend on that override, use the local desktop bundle below: it includes the verified custom backend in its own resources. The launcher passes `--user-data-dir` explicitly and validates the actual backend even if the initial process exits. On failure, the error includes the expected path, observed backend paths and application log directory.
 
 **Rollback:** close this instance and start Codex from its usual Start-menu shortcut. The stock installation is unchanged.
 
-## Optional local Git labels
+## Local desktop bundle and Git labels
 
-The Git interface patch creates a separate local copy of the installed desktop. It adds active and completed labels for literal, standalone `git status`, `git diff`, `git log` and `git show` commands with supported flags. The command and its output remain available by expanding the row. Commands with unsupported syntax, mixed command chains, errors or interruptions keep the standard presentation. Backend command classifications and permission rules are unchanged.
+The preparation script creates a separate local copy of the installed desktop and includes all four verified backend executables. Git activity labels cover literal `status`, `diff`, `log`, `show`, `branch`, `remote`, `rev-parse`, `ls-remote` and `ls-files` commands with supported flags and selected `-c`/`-C` options. Semicolon and newline chains of Git commands receive a Git summary; supported mixtures with file reads or `rg` explicitly mention other commands. The original command and output remain available by expanding the row. Unsupported syntax, errors and interruptions keep the standard presentation. These labels do not change backend classifications or permissions.
 
 For the pinned desktop version, with Node.js and Python available:
 
 ```powershell
 $app = (Get-AppxPackage -Name OpenAI.Codex).InstallLocation + '\app'
-python scripts/powershell-parity/prepare_desktop.py --source-app $app --output artifacts/git-desktop/app
+python scripts/powershell-parity/prepare_desktop.py --source-app $app --backend-dir artifacts/powershell-parity --output artifacts/git-desktop/app
 
 # After closing Codex:
 pwsh -NoProfile -File scripts/powershell-parity/Start-Codex.ps1 -DesktopPath artifacts/git-desktop/app/ChatGPT.exe
 ```
 
-Preparation requires a new output directory and checks the exact SHA-256 of the three supported UI assets. It records the changed asset hashes and both ASAR hashes in `desktop-patch-manifest.json`. The installed desktop is not modified. A desktop update requires a new compatibility review; this is a local overlay, not an official plugin or a redistributable desktop build.
+Preparation requires a new output directory and checks the exact SHA-256 of the three supported UI assets and each backend component against the backend build manifest. It records the component hashes, changed asset hashes and both ASAR hashes in `desktop-patch-manifest.json`. The launcher verifies this manifest before starting, and checks that the running backend is a verified component. The installed desktop is not modified. A desktop update requires a new compatibility review; this is a local bundle, not an official plugin or a redistributable desktop build.
 
-`-UserDataPath` provides a separate native browser and Electron profile for testing. Ordinary launches retain the normal profile. Local verification uses `test_launcher.ps1` and `test_desktop_git_labels.cjs`; the latter requires the matching assets extracted under `.local/desktop`.
+`-UserDataPath` provides a separate native browser and Electron profile for testing. Ordinary launches retain the normal profile. Local verification uses `test_launcher.ps1`, `test_prepare_desktop.py` and `test_desktop_git_labels.cjs`; the latter requires the matching assets extracted under `.local/desktop`.
 
 ## Build and verify locally
 

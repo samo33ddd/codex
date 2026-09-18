@@ -57,6 +57,52 @@ try {
     }
     if ($global:LauncherFixture.Started -ne $starts) { throw 'Already running profile was launched again.' }
     Write-Host 'PASS: running profile rejected without launching or terminating it'
+
+    $installedApp = Join-Path $fixtureRoot 'app\ChatGPT.exe'
+    $preparedApp = Join-Path $fixtureRoot 'prepared\ChatGPT.exe'
+    $preparedResources = Join-Path $fixtureRoot 'prepared\resources'
+    New-Item -ItemType Directory -Path (Split-Path $installedApp), $preparedResources -Force | Out-Null
+    Set-Content -LiteralPath $installedApp -Value 'desktop executable fixture'
+    Copy-Item -LiteralPath $installedApp -Destination $preparedApp
+    $entries = foreach ($name in @('codex.exe', 'codex-command-runner.exe', 'codex-windows-sandbox-setup.exe', 'codex-code-mode-host.exe')) {
+        $source = if ($name -eq 'codex.exe') { $backend } else { Join-Path $fixtureRoot $name }
+        Copy-Item -LiteralPath $source -Destination (Join-Path $preparedResources $name)
+        @{ file = $name; sha256 = (Get-FileHash -LiteralPath $source).Hash }
+    }
+    $archive = Join-Path $preparedResources 'app.asar'
+    Set-Content -LiteralPath $archive -Value 'desktop UI fixture'
+    @{
+        backend = @{ version = $version.backendVersion; files = @($entries) }
+        patchedAsarSha256 = (Get-FileHash -LiteralPath $archive).Hash
+    } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path (Split-Path $preparedApp) 'desktop-patch-manifest.json')
+    $global:LauncherFixture.Running = $null
+    $global:LauncherFixture.Queries = 0
+    $global:LauncherFixture.Backend = Join-Path $preparedResources 'codex.exe'
+    $result = & (Join-Path $PSScriptRoot 'Start-Codex.ps1') -BackendPath $backend -DesktopPath $preparedApp -UserDataPath $isolated
+    if ($result.ExecutablePath -ne $global:LauncherFixture.Backend) { throw 'Verified bundled backend fallback was not recognized.' }
+    Write-Host 'PASS: desktop uses verified bundled backend when the environment override is lost'
+
+    $global:LauncherFixture.Running = [pscustomobject]@{ ExecutablePath = (Join-Path $fixtureRoot 'older-copy\ChatGPT.exe'); CommandLine = ('ChatGPT.exe --user-data-dir="' + $isolated + '"') }
+    $starts = $global:LauncherFixture.Started
+    try {
+        $null = & (Join-Path $PSScriptRoot 'Start-Codex.ps1') -BackendPath $backend -DesktopPath $preparedApp -UserDataPath $isolated
+        throw 'Expected other-copy profile rejection.'
+    } catch {
+        if ($_.Exception.Message -notlike 'Save your work*') { throw }
+    }
+    if ($global:LauncherFixture.Started -ne $starts) { throw 'Another copy sharing the profile was ignored.' }
+    Write-Host 'PASS: another desktop copy with the same profile blocks launch'
+
+    $global:LauncherFixture.Running = $null
+    Set-Content -LiteralPath (Join-Path $preparedResources 'codex.exe') -Value 'stock backend substituted'
+    try {
+        $null = & (Join-Path $PSScriptRoot 'Start-Codex.ps1') -BackendPath $backend -DesktopPath $preparedApp -UserDataPath $isolated
+        throw 'Expected substituted backend rejection.'
+    } catch {
+        if ($_.Exception.Message -notlike 'Custom backend component does not match*') { throw }
+    }
+    if ($global:LauncherFixture.Started -ne $starts) { throw 'A substituted backend was launched.' }
+    Write-Host 'PASS: stock backend substitution is rejected before launching'
 } finally {
     $resolvedFixture = [System.IO.Path]::GetFullPath($fixtureRoot)
     $temporaryRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath())

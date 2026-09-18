@@ -15,34 +15,119 @@ const baselineSha256 = {
   [files.grouping]: '1a401d7bdc6655df97a6d1e6768bad9b5aff26cd3cc9f2e8d7108a59bfe82ffd',
 };
 
-// Deliberately accepts only a small, literal, single-command subset. Unknown
-// options, shells, pipes, newlines and redirections retain the desktop fallback.
-function gitOperation(command) {
-  if (typeof command !== 'string' || command.length > 400 ||
-      /[\r\n;&|><`$(){}\\'"#]/.test(command)) return null;
-  const words = command.trim().split(/\s+/);
-  if (words.length < 2 || words.length > 12 || !/^(?:git|git\.exe)$/i.test(words[0])) return null;
-  const [, operation, ...args] = words;
-  if (!['status', 'diff', 'log', 'show'].includes(operation)) return null;
-  const safe = {
-    status: new Set(['--short', '-s', '--branch', '-b', '--porcelain', '--porcelain=v1', '--porcelain=v2', '--no-color']),
-    diff: new Set(['--stat', '--name-only', '--name-status', '--cached', '--staged', '--no-color']),
-    log: new Set(['--oneline', '--stat', '--no-color', '--decorate', '--no-decorate']),
-    show: new Set(['--stat', '--no-color', '--oneline', '--name-only', '--name-status']),
+// A bounded PowerShell literal subset: quotes and ;/newlines are understood,
+// while expansion, pipes, redirection and control flow keep the raw fallback.
+function gitStages(command) {
+  if (typeof command !== 'string' || command.length > 900) return null;
+  const stages = [], words = [];
+  let value = '', quote = '', quoted = false, started = false, trailingSemicolon = false;
+  const word = () => {
+    if (!started || value.length > 240) return !started;
+    words.push({value, quoted});
+    value = ''; quoted = false; started = false;
+    return words.length <= 20;
+  };
+  const stage = () => {
+    if (!word() || words.length === 0) return false;
+    stages.push(words.splice(0));
+    return stages.length <= 8;
+  };
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i];
+    if (quote) {
+      if (ch === quote) {
+        if (command[i + 1] === quote) { value += ch; i++; }
+        else quote = '';
+      } else {
+        if (quote === '"' && (ch === '$' || ch === '`')) return null;
+        value += ch;
+      }
+      continue;
+    }
+    if (ch === '"' || ch === "'") { quote = ch; quoted = true; started = true; continue; }
+    if (ch === ';' || ch === '\r' || ch === '\n') {
+      if (ch === ';' || started || words.length) {
+        if (!stage()) return null;
+      }
+      trailingSemicolon = ch === ';';
+      if (ch === '\r' && command[i + 1] === '\n') i++;
+      continue;
+    }
+    if (/\s/.test(ch)) { if (!word()) return null; continue; }
+    if (/[&|><`$#(){}]/.test(ch)) return null;
+    value += ch; started = true; trailingSemicolon = false;
+  }
+  if (quote || trailingSemicolon) return null;
+  if ((started || words.length) && !stage()) return null;
+  return stages.length ? stages : null;
+}
+
+function gitStage(words) {
+  if (words[0].quoted || !/^(?:git|git\.exe)$/i.test(words[0].value)) return null;
+  const args = words.slice(1).map(word => word.value);
+  let prefix = 0, usedCwd = false, usedConfig = false;
+  while (args[prefix] === '-c' || args[prefix] === '-C') {
+    const option = args[prefix++], value = args[prefix++];
+    if (option === '-c') {
+      if (usedConfig || !['core.safecrlf=false', 'core.quotepath=false', 'color.ui=false'].includes(value)) return null;
+      usedConfig = true;
+    } else {
+      if (usedCwd || !value || !/^[\w.\/:\\-]+$/.test(value) || value.startsWith('-')) return null;
+      usedCwd = true;
+    }
+  }
+  const operation = args[prefix++], tail = args.slice(prefix);
+  const allowed = {
+    status: ['--short', '-s', '--branch', '-b', '--porcelain', '--porcelain=v1', '--porcelain=v2', '--no-color'],
+    diff: ['--check', '--stat', '--name-only', '--name-status', '--cached', '--staged', '--no-color'],
+    branch: ['--show-current', '--list', '-a', '-r', '--all', '--remotes', '--no-color'],
+    log: ['--oneline', '--stat', '--no-color', '--decorate', '--no-decorate'],
+    show: ['--stat', '--no-color', '--oneline', '--name-only', '--name-status'],
+    remote: ['-v'],
+    'rev-parse': ['--abbrev-ref', '--symbolic-full-name', '--show-toplevel', '--is-inside-work-tree'],
+    'ls-remote': ['--heads', '--tags', '--refs', '--symref'],
+    'ls-files': [],
   }[operation];
-  let seenRevision = false;
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i];
-    if (safe.has(arg)) continue;
-    if (operation === 'log' && /^--max-count=[1-9]\d{0,4}$/.test(arg)) continue;
-    if (operation === 'log' && arg === '-n' && /^[1-9]\d{0,4}$/.test(args[++i] || '')) continue;
-    // A single simple revision is unambiguous for log/show. Do not mistake a
-    // file, shell option, or Git revision expression for a safe literal here.
-    if ((operation === 'log' || operation === 'show') && !seenRevision &&
-        /^(?:HEAD|[0-9a-f]{7,40})$/.test(arg)) { seenRevision = true; continue; }
+  if (!allowed) return null;
+  let positional = 0;
+  for (let i = 0; i < tail.length; i++) {
+    const arg = tail[i];
+    if (allowed.includes(arg)) continue;
+    if (operation === 'log' && (/^-[1-9]\d{0,3}$/.test(arg) || /^--max-count=[1-9]\d{0,3}$/.test(arg))) continue;
+    if (operation === 'log' && arg === '-n' && /^[1-9]\d{0,3}$/.test(tail[++i] || '')) continue;
+    if ((operation === 'log' || operation === 'show') && positional++ === 0 && /^(?:HEAD|[0-9a-f]{7,40})$/.test(arg)) continue;
+    if (operation === 'remote' && tail.length === 2 && tail[0] === 'show' && i === 0) continue;
+    if (operation === 'remote' && tail.length === 2 && tail[0] === 'show' && i === 1 && /^[\w.-]+$/.test(arg)) continue;
+    if (operation === 'rev-parse' && positional++ <= 1 && (arg === '@{u}' || arg === 'HEAD')) continue;
+    if (operation === 'ls-remote' && positional++ < 3 && /^[\w./:-]+$/.test(arg)) continue;
+    if (operation === 'ls-files' && positional++ === 0 && /^[\w./\\:-]+$/.test(arg)) continue;
     return null;
   }
   return operation;
+}
+
+function otherReadStage(words) {
+  const head = words[0].value.toLowerCase(), args = words.slice(1).map(word => word.value);
+  if (words[0].quoted) return false;
+  if (['get-content', 'gc', 'cat', 'type'].includes(head)) {
+    if (args.length === 1) return Boolean(args[0]);
+    return args.length === 2 && args[0].toLowerCase() === '-literalpath' && Boolean(args[1]);
+  }
+  if (head === 'rg' || head === 'rg.exe') {
+    return args.length >= 1 && args.length <= 4 &&
+      args.every(arg => !arg.startsWith('-') || ['-n', '-i', '--files'].includes(arg));
+  }
+  return false;
+}
+
+function gitOperation(command) {
+  const stages = gitStages(command);
+  if (!stages) return null;
+  const operations = stages.map(gitStage);
+  const gitCount = operations.filter(Boolean).length;
+  if (!gitCount || stages.some((words, index) => !operations[index] && !otherReadStage(words))) return null;
+  if (gitCount !== stages.length) return 'git_and_other';
+  return stages.length > 1 ? 'git_commands' : operations[0];
 }
 
 function gitLocale() {
@@ -57,14 +142,24 @@ function gitLabel(operation, finished = false) {
     diff: finished ? 'Просмотрены изменения Git' : 'Просматриваются изменения Git',
     log: finished ? 'Просмотрена история Git' : 'Просматривается история Git',
     show: finished ? 'Просмотрен объект Git' : 'Просматривается объект Git',
+    branch: finished ? 'Проверена ветка Git' : 'Проверяется ветка Git',
+    remote: finished ? 'Проверены удалённые репозитории Git' : 'Проверяются удалённые репозитории Git',
+    'rev-parse': finished ? 'Проверена ссылка Git' : 'Проверяется ссылка Git',
+    'ls-remote': finished ? 'Проверены удалённые ветки Git' : 'Проверяются удалённые ветки Git',
+    'ls-files': finished ? 'Просмотрены файлы Git' : 'Просматриваются файлы Git',
+    git_commands: finished ? 'Выполнены команды Git' : 'Выполняются команды Git',
+    git_and_other: finished ? 'Выполнены Git и другие команды' : 'Выполняются Git и другие команды',
   })[operation] || null;
+  if (operation === 'git_commands') return finished ? 'Ran Git commands' : 'Running Git commands';
+  if (operation === 'git_and_other') return finished ? 'Ran Git and other commands' : 'Running Git and other commands';
   const label = {status: 'Git status', diff: 'Git diff',
-    log: 'Git history', show: 'Git object'}[operation];
+    log: 'Git history', show: 'Git object', branch: 'Git branch', remote: 'Git remotes',
+    'rev-parse': 'Git reference', 'ls-remote': 'remote Git branches', 'ls-files': 'Git files'}[operation];
   return label ? `${finished ? 'Inspected' : 'Inspecting'} ${label}` : null;
 }
 
 // Each chunk gets a private copy; no new import path or ASAR entry is needed.
-const helper = `${gitOperation.toString()}\n${gitLocale.toString()}\n${gitLabel.toString()}\n`;
+const helper = `${gitStages.toString()}\n${gitStage.toString()}\n${otherReadStage.toString()}\n${gitOperation.toString()}\n${gitLocale.toString()}\n${gitLabel.toString()}\n`;
 
 function replaceOne(source, oldText, newText, name) {
   const first = source.indexOf(oldText);

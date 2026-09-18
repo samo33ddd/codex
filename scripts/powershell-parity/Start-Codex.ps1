@@ -8,8 +8,15 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $compatibility = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'compatibility.json') -Raw | ConvertFrom-Json
+$bundledBackend = $null
+if ($DesktopPath) {
+    $desktop = (Resolve-Path -LiteralPath $DesktopPath).Path
+    $bundledBackend = Join-Path (Split-Path $desktop) 'resources\codex.exe'
+}
 if ($BackendPath) {
     $backend = [System.IO.Path]::GetFullPath($BackendPath)
+} elseif ($bundledBackend) {
+    $backend = $bundledBackend
 } elseif (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'codex.exe')) {
     $backend = Join-Path $PSScriptRoot 'codex.exe'
 } else {
@@ -34,12 +41,31 @@ if ($null -eq $package -or $package.Version -notin $compatibility.desktopVersion
 }
 $app = Join-Path $package.InstallLocation 'app\ChatGPT.exe'
 if ($DesktopPath) {
-    $desktop = (Resolve-Path -LiteralPath $DesktopPath).Path
     if ((Get-FileHash -LiteralPath $desktop).Hash -ne (Get-FileHash -LiteralPath $app).Hash) {
         throw 'The custom desktop executable must match the installed, supported desktop version.'
     }
+    $manifestPath = Join-Path (Split-Path $desktop) 'desktop-patch-manifest.json'
+    $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+    if ($manifest.backend.version -ne $compatibility.backendVersion) {
+        throw 'This desktop does not contain a verified custom backend. Rebuild it with prepare_desktop.py --backend-dir.'
+    }
+    foreach ($name in @('codex.exe', 'codex-command-runner.exe', 'codex-windows-sandbox-setup.exe', 'codex-code-mode-host.exe')) {
+        $entry = @($manifest.backend.files | Where-Object { $_.file -eq $name })
+        $bundledComponent = Join-Path (Split-Path $bundledBackend) $name
+        $selectedComponent = if ($name -eq 'codex.exe') { $backend } else { Join-Path (Split-Path $backend) $name }
+        if ($entry.Count -ne 1 -or (Get-FileHash -LiteralPath $bundledComponent).Hash -ne $entry[0].sha256 -or
+            (Get-FileHash -LiteralPath $selectedComponent).Hash -ne $entry[0].sha256) {
+            throw "Custom backend component does not match the desktop manifest: $name"
+        }
+    }
+    $archive = Join-Path (Split-Path $desktop) 'resources\app.asar'
+    if ((Get-FileHash -LiteralPath $archive).Hash -ne $manifest.patchedAsarSha256) {
+        throw 'Desktop UI archive does not match the prepared manifest.'
+    }
     $app = $desktop
 }
+$backendPaths = @($backend)
+if ($bundledBackend -and $bundledBackend -ne $backend) { $backendPaths += $bundledBackend }
 $isolatedProfile = -not [string]::IsNullOrWhiteSpace($UserDataPath)
 if ($isolatedProfile) {
     $UserDataPath = [System.IO.Path]::GetFullPath($UserDataPath)
@@ -52,15 +78,15 @@ if ($ValidateOnly) {
 }
 $running = Get-CimInstance Win32_Process -Filter "Name='ChatGPT.exe'" |
     Where-Object {
-        ($_.ExecutablePath -eq $app -or $_.ExecutablePath -eq (Join-Path $package.InstallLocation 'app\ChatGPT.exe')) -and
-        (-not $isolatedProfile -or $_.CommandLine -match ('--user-data-dir=(?:"' + [regex]::Escape($UserDataPath) + '"|' + [regex]::Escape($UserDataPath) + '(?=\s|$))'))
+        $_.CommandLine -match ('--user-data-dir=(?:"' + [regex]::Escape($UserDataPath) + '"|' + [regex]::Escape($UserDataPath) + '(?=\s|$))') -or
+        (-not $isolatedProfile -and ($_.ExecutablePath -eq $app -or $_.ExecutablePath -eq (Join-Path $package.InstallLocation 'app\ChatGPT.exe')))
     }
 if ($running) {
     throw 'Save your work and close Codex yourself, then run this launcher again. It never terminates an active session.'
 }
 # Environment belongs only to the new process; user/machine variables are untouched.
 $existingBackendIds = @(Get-CimInstance Win32_Process -Filter "Name='codex.exe'" |
-    Where-Object { $_.ExecutablePath -eq $backend } | Select-Object -ExpandProperty ProcessId)
+    Where-Object { $_.ExecutablePath -in $backendPaths } | Select-Object -ExpandProperty ProcessId)
 $launchEnvironment = @{ CODEX_CLI_PATH = $backend }
 if ($isolatedProfile) {
     $launchEnvironment.CODEX_ELECTRON_USER_DATA_PATH = $UserDataPath
@@ -71,7 +97,7 @@ $deadline = (Get-Date).AddSeconds(30)
 do {
     Start-Sleep -Milliseconds 500
     $process = Get-CimInstance Win32_Process -Filter "Name='codex.exe'" |
-        Where-Object { $_.ExecutablePath -eq $backend -and $_.ProcessId -notin $existingBackendIds }
+        Where-Object { $_.ExecutablePath -in $backendPaths -and $_.ProcessId -notin $existingBackendIds }
 } while (-not $process -and (Get-Date) -lt $deadline)
 if (-not $process) {
     $observed = @(Get-CimInstance Win32_Process -Filter "Name='codex.exe'" |
