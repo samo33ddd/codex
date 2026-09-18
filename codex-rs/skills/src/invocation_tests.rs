@@ -115,11 +115,71 @@ fn windows_executor_skill_reads_share_powershell_classification() {
         r"Get-Content -Raw -LiteralPath C:\skills\demo\SKILL.md",
         r"gc C:\skills\demo\SKILL.md",
         r"type C:\skills\demo\SKILL.md",
+        r"cat C:\skills\demo\SKILL.md",
+        r"Get-Content -LiteralPath C:\skills\demo\SKILL.md -TotalCount 160",
+        r"Get-Content -LiteralPath C:\skills\demo\SKILL.md -Encoding utf8",
+        r"Get-Content C:\skills\demo\SKILL.md | Select-Object -Skip 3 -First 20",
     ] {
         assert_eq!(
             implicit_skill_accesses_for_command(command, &workdir),
             vec![ImplicitSkillAccess::Document(document.clone())],
             "command: {command}"
+        );
+    }
+}
+
+#[test]
+fn shell_equivalent_skill_reads_resolve_against_executor_cwd() {
+    for (bash, powershell) in [
+        ("cat demo/SKILL.md", "Get-Content demo/SKILL.md -Raw"),
+        (
+            "head -n 160 demo/SKILL.md",
+            "gc demo/SKILL.md -TotalCount 160",
+        ),
+        (
+            "tail -n 20 demo/SKILL.md",
+            "Get-Content demo/SKILL.md -Tail 20",
+        ),
+        (
+            "sed -n '4,23p' demo/SKILL.md",
+            "Get-Content demo/SKILL.md | select -Skip 3 -First 20",
+        ),
+    ] {
+        for (command, cwd, document) in [
+            (bash, "file:///skills", "file:///skills/demo/SKILL.md"),
+            (
+                powershell,
+                "file:///C:/skills",
+                "file:///C:/skills/demo/SKILL.md",
+            ),
+        ] {
+            assert_eq!(
+                implicit_skill_accesses_for_command(command, &PathUri::parse(cwd).unwrap()),
+                vec![ImplicitSkillAccess::Document(
+                    PathUri::parse(document).unwrap()
+                )],
+                "{command}",
+            );
+        }
+    }
+}
+
+#[test]
+fn opaque_powershell_does_not_report_skill_document_access() {
+    let cwd = PathUri::parse("file:///C:/skills").unwrap();
+    for command in [
+        r#"Get-Content "$env:TEMP/demo/SKILL.md""#,
+        r#"Get-Content "$(Get-Location)/demo/SKILL.md""#,
+        "Get-Content demo/SKILL.md; Set-Content other.txt changed",
+        "Get-Content demo/SKILL.md | Tee-Object other.txt",
+        "Get-Content demo/SKILL.md > other.txt",
+        "Get-Content demo/SKILL.md -OutVariable contents",
+        "Get-Content -LiteralPath demo/SKILL.md -TotalCount",
+    ] {
+        assert_eq!(
+            implicit_skill_accesses_for_command(command, &cwd),
+            vec![],
+            "{command}"
         );
     }
 }
@@ -134,13 +194,19 @@ fn skill_doc_read_detection_matches_absolute_path() {
         ..Default::default()
     };
     let tokens = vec![
-        "cat".to_string(),
-        test_path_display("/tmp/skill-test/SKILL.md"),
-        "|".to_string(),
-        "head".to_string(),
+        "bash".to_string(),
+        "-lc".to_string(),
+        format!(
+            "cat '{}' | head",
+            test_path_display("/tmp/skill-test/SKILL.md")
+        ),
     ];
 
-    let found = detect_skill_doc_read(&outcome, &tokens, &test_path_buf("/tmp").abs());
+    let found = detect_skill_doc_read(
+        &outcome,
+        &parse_command(&tokens),
+        &test_path_buf("/tmp").abs(),
+    );
 
     assert_eq!(
         found.map(|value| value.name),
@@ -163,7 +229,11 @@ fn skill_doc_read_detection_matches_shared_read_parser() {
         test_path_display("/tmp/skill-test/SKILL.md"),
     ];
 
-    let found = detect_skill_doc_read(&outcome, &tokens, &test_path_buf("/tmp").abs());
+    let found = detect_skill_doc_read(
+        &outcome,
+        &parse_command(&tokens),
+        &test_path_buf("/tmp").abs(),
+    );
 
     assert_eq!(
         found.map(|value| value.name),

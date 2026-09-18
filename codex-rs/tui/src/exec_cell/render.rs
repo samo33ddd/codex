@@ -969,7 +969,7 @@ mod tests {
         let command = vec![
             "powershell.exe".to_string(),
             "-Command".to_string(),
-            r"Get-Content C:\skills\demo\SKILL.md".to_string(),
+            r"Get-Content -LiteralPath 'C:\skills\demo\SKILL.md' -Encoding utf8 -TotalCount 160 | Select-Object -First 20".to_string(),
         ];
         let parsed = codex_shell_command::parse_command::parse_command(&command);
         let cell = new_active_exec_command(

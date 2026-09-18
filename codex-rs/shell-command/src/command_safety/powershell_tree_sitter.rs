@@ -11,10 +11,27 @@ use tree_sitter::Parser;
 /// at. The accepted CST shapes intentionally cover only common literal command forms; rare
 /// PowerShell syntax and value-conversion cases stay opaque.
 pub(crate) fn try_parse_powershell_commands(script: &str) -> Option<Vec<Vec<String>>> {
+    Some(
+        try_parse_powershell_commands_with_source(script)?
+            .into_iter()
+            .map(|command| command.words)
+            .collect(),
+    )
+}
+
+pub(crate) struct LiteralCommand {
+    pub(crate) words: Vec<String>,
+    pub(crate) quoted: Vec<bool>,
+    pub(crate) range: std::ops::Range<usize>,
+}
+
+pub(crate) fn try_parse_powershell_commands_with_source(
+    script: &str,
+) -> Option<Vec<LiteralCommand>> {
     lower_with_tree_sitter(script).ok()
 }
 
-fn lower_with_tree_sitter(script: &str) -> Result<Vec<Vec<String>>, String> {
+fn lower_with_tree_sitter(script: &str) -> Result<Vec<LiteralCommand>, String> {
     // PowerShell treats these Unicode characters as syntax aliases even when tree-sitter leaves
     // them inside generic tokens. Keep that whole spelling family opaque rather than guessing at
     // whether a quote or dash is structural in a particular position.
@@ -63,13 +80,19 @@ fn lower_with_tree_sitter(script: &str) -> Result<Vec<Vec<String>>, String> {
             .utf8_text(script.as_bytes())
             .map_err(|_| "command source is not UTF-8".to_string())?;
         command_ranges.push(node.start_byte()..node.end_byte());
-        commands.push(lower_command_text(text)?);
+        let (words, quoted) = lower_command_text(text)?;
+        commands.push(LiteralCommand {
+            words,
+            quoted,
+            range: node.start_byte()..node.end_byte(),
+        });
     }
     if !source_is_covered_by_commands(script, &command_ranges) {
         return Err("source outside literal command nodes".to_string());
     }
     if commands.iter().any(|command| {
         command
+            .words
             .first()
             .is_some_and(|word| word.eq_ignore_ascii_case("using"))
     }) {
@@ -77,7 +100,7 @@ fn lower_with_tree_sitter(script: &str) -> Result<Vec<Vec<String>>, String> {
     }
     if commands
         .iter()
-        .any(|command| command.is_empty() || command.iter().any(String::is_empty))
+        .any(|command| command.words.is_empty() || command.words.iter().any(String::is_empty))
     {
         return Err("empty lowered command or word".to_string());
     }
@@ -306,10 +329,11 @@ fn source_is_covered_by_commands(script: &str, command_ranges: &[std::ops::Range
     range_index == command_ranges.len() && !needs_command && paren_depth == 0
 }
 
-fn lower_command_text(command_text: &str) -> Result<Vec<String>, String> {
+fn lower_command_text(command_text: &str) -> Result<(Vec<String>, Vec<bool>), String> {
     // This is literal argv lowering, not safe/dangerous classification. Quoting and escapes are
     // decoded only for forms whose runtime value is statically known.
     let mut words = Vec::new();
+    let mut quoted = Vec::new();
     let chars: Vec<char> = command_text.trim().chars().collect();
     let mut index = 0;
     while index < chars.len() {
@@ -319,6 +343,7 @@ fn lower_command_text(command_text: &str) -> Result<Vec<String>, String> {
         if index == chars.len() || chars[index] == '#' {
             break;
         }
+        let escaped_leading_character = chars[index] == '`';
         let (word, next, is_bare) = if chars[index] == '\'' {
             let (word, next) = parse_single_quoted(&chars, index)?;
             (word, next, false)
@@ -340,12 +365,14 @@ fn lower_command_text(command_text: &str) -> Result<Vec<String>, String> {
             reject_unsupported_bare_word(&word)?;
         }
         words.push(word);
+        // An escaped leading dash is positional too, even without surrounding quotes.
+        quoted.push(!is_bare || escaped_leading_character);
     }
 
     if words.is_empty() {
         return Err("command lowered to no words".to_string());
     }
-    Ok(words)
+    Ok((words, quoted))
 }
 
 fn parse_single_quoted(chars: &[char], start: usize) -> Result<(String, usize), String> {

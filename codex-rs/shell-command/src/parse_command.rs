@@ -12,28 +12,18 @@ pub fn shlex_join(tokens: &[String]) -> String {
         .unwrap_or_else(|_| "<command included NUL byte>".to_string())
 }
 
-/// Tokenizes a PowerShell command while preserving Windows paths and reader aliases.
+/// Lowers exactly one literal PowerShell command without executing it.
 pub fn tokenize_powershell_command(command: &str) -> Vec<String> {
-    let normalized = command.replace('\\', "/");
-    let mut tokens = shlex_split(&normalized)
-        .unwrap_or_else(|| normalized.split_whitespace().map(str::to_string).collect());
-    if let Some(executable) = tokens.first_mut()
-        && matches!(
-            executable.to_ascii_lowercase().as_str(),
-            "get-content" | "gc" | "type"
-        )
-    {
-        *executable = "Get-Content".to_owned();
-        // POSIX shlex must not silently rewrite a PowerShell file path.
-        if tokens
-            .iter()
-            .skip(1)
-            .any(|argument| !normalized.contains(argument))
-        {
-            return Vec::new();
-        }
+    match crate::powershell::parse_powershell_script_into_plain_commands(command) {
+        Some(mut commands) if commands.len() == 1 => commands.remove(0),
+        _ => Vec::new(),
     }
-    tokens
+}
+
+/// Classifies literal PowerShell actions for display and implicit skill access.
+/// Unknown syntax or an unsupported command keeps the entire script opaque.
+pub fn parse_powershell_script(script: &str) -> Vec<ParsedCommand> {
+    crate::powershell_presentation::parse_powershell_script(script)
 }
 
 /// Extracts the shell and script from a command, regardless of platform
@@ -72,6 +62,18 @@ pub fn parse_command(command: &[String]) -> Vec<ParsedCommand> {
 }
 
 fn single_unknown_for_command(command: &[String]) -> ParsedCommand {
+    if extract_powershell_command(command).is_some()
+        && command
+            .iter()
+            .position(|argument| {
+                argument.eq_ignore_ascii_case("-Command") || argument.eq_ignore_ascii_case("-c")
+            })
+            .is_some_and(|index| index + 2 != command.len())
+    {
+        return ParsedCommand::Unknown {
+            cmd: shlex_join(command),
+        };
+    }
     if let Some((_, shell_command)) = extract_shell_command(command) {
         ParsedCommand::Unknown {
             cmd: shell_command.to_string(),
@@ -1291,8 +1293,9 @@ mod tests {
     fn powershell_command_is_stripped() {
         assert_parsed(
             &vec_str(&["powershell", "-Command", "Get-ChildItem"]),
-            vec![ParsedCommand::Unknown {
+            vec![ParsedCommand::ListFiles {
                 cmd: "Get-ChildItem".to_string(),
+                path: None,
             }],
         );
     }
@@ -1374,14 +1377,12 @@ mod tests {
     #[test]
     fn complex_powershell_file_reads_are_intentionally_not_classified() {
         for script in [
-            r"Get-Content 'C:\Users\O''Brien\skill\SKILL.md'",
             r#"Get-Content "$(Remove-Item C:/important)/skills/demo/SKILL.md""#,
             "Get-Content -ReadCount:([IO.File]::Delete('C:/important')) C:/skills/demo/SKILL.md",
             "Get-Content C:/Users/Alice/.ssh/id_rsa,C:/skills/demo/SKILL.md",
             "Get-Content C:/skills/demo/SKILL.md -Raw; Remove-Item C:/important",
             "Get-Content C:/skills/demo/SKILL.md C:/important",
             "Get-Content C:/skills/*/SKILL.md",
-            "Get-Content -Encoding UTF8 C:/skills/demo/SKILL.md",
             "Get-Content -Raw",
         ] {
             assert_parsed(
@@ -1436,21 +1437,18 @@ pub fn parse_command_impl(command: &[String]) -> Vec<ParsedCommand> {
     if let Some((_, script)) =
         extract_powershell_command(powershell_command.as_deref().unwrap_or(command))
     {
-        let tokens = tokenize_powershell_command(script);
-        if tokens
-            .first()
-            .is_some_and(|executable| executable == "Get-Content")
-            && let [ParsedCommand::Read { name, path, .. }] = parse_command_impl(&tokens).as_slice()
+        if command
+            .iter()
+            .position(|argument| {
+                argument.eq_ignore_ascii_case("-Command") || argument.eq_ignore_ascii_case("-c")
+            })
+            .is_none_or(|index| index + 2 != command.len())
         {
-            return vec![ParsedCommand::Read {
-                cmd: script.to_string(),
-                name: name.clone(),
-                path: path.clone(),
+            return vec![ParsedCommand::Unknown {
+                cmd: shlex_join(command),
             }];
         }
-        return vec![ParsedCommand::Unknown {
-            cmd: script.to_string(),
-        }];
+        return parse_powershell_script(script);
     }
 
     let normalized = normalize_tokens(command);

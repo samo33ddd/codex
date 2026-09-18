@@ -13,8 +13,6 @@ use codex_app_server_protocol::ThreadStartResponse;
 use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::UserInput as V2UserInput;
 use codex_features::Feature;
-use codex_shell_command::shell_detect::ShellType;
-use codex_shell_command::shell_detect::detect_shell_type;
 use core_test_support::responses;
 use pretty_assertions::assert_eq;
 use serde_json::json;
@@ -274,18 +272,6 @@ async fn command_execution_notifications_preserve_selected_environment_paths() -
     .await??;
 
     let expected_actions = match shell.name.as_str() {
-        // Windows shell scripts are not yet parsed into file-read command actions.
-        "powershell" => {
-            let command = if detect_shell_type(&shell.path) == Some(ShellType::PowerShell) {
-                "cat main.rs".to_string()
-            } else {
-                shlex::try_join([shell.path.as_str(), "-Command", "cat main.rs"])?
-            };
-            json!([{
-                "type": "unknown",
-                "command": command,
-            }])
-        }
         "cmd" => {
             let command = shlex::try_join([shell.path.as_str(), "/c", "cat main.rs"])?;
             json!([{

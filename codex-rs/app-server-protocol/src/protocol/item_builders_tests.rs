@@ -9,6 +9,89 @@ use pretty_assertions::assert_eq;
 use serde_json::json;
 
 #[test]
+fn shell_equivalent_commands_produce_equivalent_wire_actions() {
+    let cwd = PathUri::parse("file:///C:/fixture").unwrap();
+    for (bash, powershell) in [
+        (
+            "head -n 160 README.md",
+            "Get-Content -LiteralPath README.md -TotalCount 160",
+        ),
+        (
+            "cat 'folder with spaces/README.md'",
+            "Get-Content -LiteralPath 'folder with spaces\\README.md' -Encoding utf8",
+        ),
+        (
+            "rg -n TODO fixture",
+            "Select-String -Pattern TODO -Path fixture",
+        ),
+        ("ls fixture", "Get-ChildItem -LiteralPath fixture"),
+        (
+            "cat README.md; rg TODO fixture; ls fixture",
+            "gc README.md; rg TODO fixture; gci fixture",
+        ),
+    ] {
+        let mut wire_actions = Vec::new();
+        for (shell, flag, script) in [
+            ("bash", "-lc", bash),
+            ("zsh", "-lc", bash),
+            ("pwsh", "-Command", powershell),
+        ] {
+            let command = [shell.to_owned(), flag.to_owned(), script.to_owned()];
+            let parsed = parse_command(&command);
+            let presentation = CommandExecutionPresentation::from_raw(&command, &parsed, &cwd);
+            let mut actions = serde_json::to_value(presentation.command_actions).unwrap();
+            for action in actions.as_array_mut().unwrap() {
+                assert_ne!(action["type"], "unknown", "{script}");
+                if shell == "pwsh" {
+                    assert_eq!(action["command"], script);
+                }
+                action.as_object_mut().unwrap().remove("command");
+            }
+            wire_actions.push(actions);
+        }
+        assert_eq!(wire_actions[0], wire_actions[1], "{bash}");
+        assert_eq!(wire_actions[0], wire_actions[2], "{powershell}");
+    }
+}
+
+#[test]
+fn powershell_wire_actions_keep_exact_paths_and_opaque_side_effects() {
+    let cwd = PathUri::parse("file:///C:/fixture").unwrap();
+    for (script, expected) in [
+        (
+            r"Get-Content -LiteralPath 'C:\fixture\O''Brien\SKILL.md' -TotalCount 160",
+            json!([{
+                "type": "read", "name": "SKILL.md", "path": "C:\\fixture\\O'Brien\\SKILL.md",
+            }]),
+        ),
+        (
+            r"Get-Content -LiteralPath '\\server\share\README.md' -Raw",
+            json!([{
+                "type": "read", "name": "README.md", "path": "\\\\server\\share\\README.md",
+            }]),
+        ),
+        (
+            r#"Get-Content "$env:TEMP\SKILL.md""#,
+            json!([{ "type": "unknown" }]),
+        ),
+        (
+            "Get-Content README.md; Remove-Item other.md",
+            json!([{ "type": "unknown" }]),
+        ),
+    ] {
+        let command = ["pwsh".to_owned(), "-Command".to_owned(), script.to_owned()];
+        let parsed = parse_command(&command);
+        let presentation = CommandExecutionPresentation::from_raw(&command, &parsed, &cwd);
+        let mut actual = serde_json::to_value(presentation.command_actions).unwrap();
+        for action in actual.as_array_mut().unwrap() {
+            assert_eq!(action["command"], script);
+            action.as_object_mut().unwrap().remove("command");
+        }
+        assert_eq!(actual, expected, "{script}");
+    }
+}
+
+#[test]
 fn read_command_actions_preserve_native_and_foreign_paths() {
     let api_key = "sk-abcdefghijklmnopqrstuvwxyz123456";
     for (cwd_uri, relative_path, expected_path) in [

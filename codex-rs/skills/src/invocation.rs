@@ -1,7 +1,8 @@
 use std::path::Path;
 
 use codex_protocol::parse_command::ParsedCommand;
-use codex_shell_command::parse_command::parse_command_impl;
+use codex_shell_command::parse_command::parse_command;
+use codex_shell_command::parse_command::parse_powershell_script;
 use codex_shell_command::parse_command::tokenize_powershell_command;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::PathConvention;
@@ -39,7 +40,12 @@ pub fn detect_implicit_skill_invocation_for_command(
         return Some(candidate);
     }
 
-    detect_skill_doc_read(outcome, tokens.as_slice(), &workdir)
+    let parsed = if PathConvention::native() == PathConvention::Windows {
+        parse_powershell_script(command)
+    } else {
+        parse_command(&["bash".to_owned(), "-lc".to_owned(), command.to_owned()])
+    };
+    detect_skill_doc_read(outcome, &parsed, &workdir)
 }
 
 /// Resolves statically recognizable skill accesses without consulting the host filesystem.
@@ -59,7 +65,12 @@ pub fn implicit_skill_accesses_for_command(
         accesses.push(ImplicitSkillAccess::Script(path));
     }
 
-    for parsed in parse_command_impl(&tokens) {
+    let parsed = if workdir.infer_path_convention() == Some(PathConvention::Windows) {
+        parse_powershell_script(command)
+    } else {
+        parse_command(&["bash".to_owned(), "-lc".to_owned(), command.to_owned()])
+    };
+    for parsed in parsed {
         if let ParsedCommand::Read { path, .. } = parsed
             && let Some(path) = path.to_str()
             && let Ok(path) = workdir.join(path)
@@ -128,10 +139,10 @@ fn detect_skill_script_run(
 
 fn detect_skill_doc_read(
     outcome: &impl ImplicitSkillLookup,
-    tokens: &[String],
+    commands: &[ParsedCommand],
     workdir: &AbsolutePathBuf,
 ) -> Option<SkillMetadata> {
-    for command in parse_command_impl(tokens) {
+    for command in commands {
         if let ParsedCommand::Read { path, .. } = command {
             let candidate_path = canonicalize_if_exists(&workdir.join(path.as_path()));
             if let Some(candidate) = outcome.implicit_skill_for_doc_path(&candidate_path) {
