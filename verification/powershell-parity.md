@@ -53,10 +53,15 @@ Machine-specific paths, process IDs, disposable profile data and raw logs are no
 
 Read-only inspection of the installed desktop resources confirmed `CODEX_CLI_PATH` support. An isolated desktop instance then ran the patched backend; its actual executable path was checked, while the normal application remained on the stock backend.
 
-The expanded history showed all 13 ordered read/search/list entries with `Прочитал`, `Выполнен поиск`, and `Перечислил`. Clicking README opened the correct fixture containing `TODO first`, `middle line`, and `last line`. Clicking SKILL.md opened the correct fixture metadata. Screenshots:
+The expanded history showed all 13 ordered read/search/list entries. The screenshots below were recaptured with the desktop's English interface, showing `Read`, `Searched`, and `Listed`. Clicking README opened the correct fixture containing `TODO first`, `middle line`, and `last line`. Clicking SKILL.md opened the correct fixture metadata.
 
-- [Read actions, grouping, and README target](desktop-readme.png)
-- [Skill document target](desktop-skill.png)
+### File reads, search and listings
+
+![English activity history with the README opened from a read action](desktop-readme.png)
+
+### Skill document preview
+
+![English activity history with the SKILL.md fixture opened in the side panel](desktop-skill.png)
 
 The skill fixture was shown as a file read. Registered-skill detection and special TUI labeling are covered by the skills/TUI tests; the screenshot alone is not evidence of registered-skill labeling.
 

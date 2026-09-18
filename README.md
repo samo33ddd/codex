@@ -1,10 +1,27 @@
 # Codex PowerShell Actions
 
-Unofficial, version-pinned backend patch for **Codex on Windows / PowerShell 7**. It makes reliably recognizable file reads, content searches, and directory listings appear as those actions in Codex instead of generic command executions.
+**Readable file actions for Codex on Windows.**
 
-This is a fork of [openai/codex](https://github.com/openai/codex), with the patch maintained on `powershell-action-parity`. It is maintained independently and is not an OpenAI release or a desktop plugin. The desktop application's installed resources are not modified.
+[![Windows checks](https://github.com/samo33ddd/codex/actions/workflows/powershell-parity.yml/badge.svg?branch=powershell-action-parity)](https://github.com/samo33ddd/codex/actions/workflows/powershell-parity.yml)
+[![Upstream compatibility](https://github.com/samo33ddd/codex/actions/workflows/powershell-upstream.yml/badge.svg?branch=powershell-action-parity)](https://github.com/samo33ddd/codex/actions/workflows/powershell-upstream.yml)
 
-![PowerShell actions and a working file link](verification/desktop-readme.png)
+[Get a candidate build](#use-a-candidate-build) · [Compatibility](#compatibility) · [Supported commands](#what-changes) · [Verification](verification/powershell-parity.md)
+
+An unofficial, version-pinned backend patch for **Windows x64 and PowerShell 7**. Recognized file reads, searches, and directory listings appear as structured actions in the Codex activity history, with file links where supported.
+
+| PowerShell command | Activity |
+|---|---|
+| `Get-Content README.md` | Read a file and open its preview |
+| `Select-String -Path README.md -Pattern TODO` | Search file contents |
+| `Get-ChildItem` | List files |
+
+## In action
+
+![English Codex interface showing PowerShell read, search and list actions beside the opened README](verification/desktop-readme.png)
+
+*A real desktop capture: expanded PowerShell activity on the left, the file opened from a read action on the right. Captured with the English interface in an isolated test profile.*
+
+This fork preserves the history of [openai/codex](https://github.com/openai/codex); the patch lives on `powershell-action-parity`. It is not an OpenAI release or a desktop plugin. The installed desktop resources are unchanged.
 
 ## Compatibility
 
