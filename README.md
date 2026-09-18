@@ -2,7 +2,7 @@
 
 Unofficial, version-pinned backend patch for **Codex on Windows / PowerShell 7**. It makes reliably recognizable file reads, content searches, and directory listings appear as those actions in Codex instead of generic command executions.
 
-This repository preserves the history of [openai/codex](https://github.com/openai/codex). It is maintained independently and is not an OpenAI release or a desktop plugin. The desktop application's installed resources are not modified.
+This is a fork of [openai/codex](https://github.com/openai/codex), with the patch maintained on `powershell-action-parity`. It is maintained independently and is not an OpenAI release or a desktop plugin. The desktop application's installed resources are not modified.
 
 ![PowerShell actions and a working file link](verification/desktop-readme.png)
 
@@ -33,7 +33,7 @@ See [coverage and verification](verification/powershell-parity.md) for precise b
 
 ## Use a candidate build
 
-[PowerShell parity Actions](https://github.com/samo33ddd/codex-powershell-actions/actions/workflows/powershell-parity.yml) produces a candidate ZIP after the Windows checks pass. Candidates are not automatically published as releases or declared desktop-compatible. There is no automatic updater.
+[PowerShell parity Actions](https://github.com/samo33ddd/codex/actions/workflows/powershell-parity.yml) produces a candidate ZIP after the Windows checks pass. Candidates are not automatically published as releases or declared desktop-compatible. There is no automatic updater.
 
 1. Download and extract a candidate artifact. It includes SHA-256 checksums, a build manifest, the launcher, three locally built executables, and the pinned official `codex-code-mode-host.exe`.
 2. In PowerShell 7, validate the installed desktop and the extracted components:
@@ -85,7 +85,7 @@ This upstream tag normalizes local workspace package versions in Cargo.lock duri
 - `powershell-action-parity`: default branch for the patch, documentation, CI, and update checks.
 - `ps-actions/0.155.0-alpha.2.6`: maintenance branch for the recorded source baseline.
 
-The [upstream compatibility workflow](https://github.com/samo33ddd/codex-powershell-actions/actions/workflows/powershell-upstream.yml) runs every Monday at 06:37 UTC and can be started manually with a source tag. It checks patch applicability using an isolated Git index. It never checks out or executes candidate source, rewrites a branch, pushes, or updates a desktop installation. Its summary and JSON artifact distinguish an applicable patch, an already-applied patch, and a conflict. A conflict is a report outcome, not a claim that tests passed.
+The [upstream compatibility workflow](https://github.com/samo33ddd/codex/actions/workflows/powershell-upstream.yml) runs every Monday at 06:37 UTC and can be started manually with a source tag. It checks patch applicability using an isolated Git index. It never checks out or executes candidate source, rewrites a branch, pushes, or updates a desktop installation. Its summary and JSON artifact distinguish an applicable patch, an already-applied patch, and a conflict. A conflict is a report outcome, not a claim that tests passed.
 
 For a new desktop version:
 
@@ -95,7 +95,7 @@ For a new desktop version:
 4. Test an isolated desktop instance: labels, ordering/grouping, actual file links, skills and relevant MCP/tools.
 5. Publish a release only after recording those results. Attach the tested package, checksums, and compatibility notes; retain previous tags for rollback.
 
-Inherited OpenAI workflows are disabled in this repository's Actions settings; only the two PowerShell workflows are enabled. They use standard hosted runners and do not require OpenAI's signing secrets or private runner groups.
+The two PowerShell workflows use standard hosted runners and do not require OpenAI's signing secrets or private runner groups. Existing fork branches and inherited workflow settings are preserved; pushing the patch branches does not trigger the upstream main-branch or tag-release workflows.
 
 ## License
 
