@@ -1,0 +1,127 @@
+name: PowerShell parity
+
+on:
+  push:
+    branches: [powershell-action-parity, 'ps-actions/**']
+  pull_request:
+    branches: [powershell-action-parity, 'ps-actions/**']
+  workflow_dispatch:
+    inputs:
+      configuration:
+        description: Native build profile (release builds take longer)
+        type: choice
+        options: [dev, release]
+        default: dev
+
+permissions:
+  contents: read
+
+concurrency:
+  group: powershell-parity-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  source-checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          components: rustfmt
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13'
+      - uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
+        with:
+          tool: actionlint@1.7.7
+      - name: Rust formatting
+        working-directory: codex-rs
+        run: cargo fmt -- --config imports_granularity=Item --check
+      - name: Delivery script lint and behavior
+        run: |
+          python -m pip install ruff==0.15.13
+          python -m ruff check scripts/powershell-parity
+          python -m ruff format --check scripts/powershell-parity
+          python -m unittest discover -s scripts/powershell-parity -p 'test_*.py' -v
+      - name: Workflow syntax
+        run: actionlint .github/workflows/powershell-parity.yml .github/workflows/powershell-upstream.yml
+
+  windows:
+    needs: source-checks
+    runs-on: windows-2022
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_PROFILE_RELEASE_DEBUG: '0'
+      CARGO_BUILD_JOBS: '4'
+      CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
+      BUILD_PROFILE: ${{ inputs.configuration || 'dev' }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13'
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          components: clippy
+      - uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
+        with:
+          tool: just@1.58.0,cargo-nextest@0.9.145,ripgrep@14.1.1
+      - name: Cache downloaded Cargo dependencies
+        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: parity-cargo-${{ runner.os }}-${{ hashFiles('codex-rs/Cargo.lock') }}
+      - name: Toolchain and fixture prerequisites
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          git config --local core.longpaths true
+          rustc --version
+          just --version
+          cargo nextest --version
+          rg --version
+          Get-PSDrive -PSProvider FileSystem | Select-Object Name,Free
+          $buildTarget = Join-Path $env:RUNNER_TEMP 'ps-target'
+          "CARGO_TARGET_DIR=$buildTarget" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Scoped parser, skills and protocol tests
+        working-directory: codex-rs
+        run: just test -p codex-shell-command -p codex-skills -p codex-app-server-protocol
+      - name: PowerShell skill rendering snapshot
+        working-directory: codex-rs
+        run: just test -p codex-tui --lib -E 'test(exec_cell::render::tests::powershell_skill_read_snapshot)'
+      - name: Parser lint
+        working-directory: codex-rs
+        run: cargo clippy -p codex-shell-command --lib -- -D warnings
+      - name: Build Windows backend and sandbox helpers
+        working-directory: codex-rs
+        run: cargo build --profile $env:BUILD_PROFILE -p codex-cli -p codex-windows-sandbox --bins
+      - name: App-server contract and package
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $profileDirectory = if ($env:BUILD_PROFILE -eq 'dev') { 'debug' } else { 'release' }
+          $binaryDirectory = Join-Path $env:CARGO_TARGET_DIR $profileDirectory
+          python scripts/powershell-parity/check_app_server.py --binary "$binaryDirectory/codex.exe" --output "$env:RUNNER_TEMP/parity-rpc"
+          python scripts/powershell-parity/package_windows.py --binary-dir $binaryDirectory --output artifacts/codex-powershell-actions-windows-x64 --profile $env:BUILD_PROFILE
+          Copy-Item "$env:RUNNER_TEMP/parity-rpc/result.json" artifacts/appserver-result.json
+      - name: Upload candidate package and checksums
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: powershell-actions-windows-x64-${{ github.sha }}
+          path: |
+            artifacts/*.zip
+            artifacts/*.sha256
+            artifacts/appserver-result.json
+          if-no-files-found: error
+          retention-days: 14

@@ -94,3 +94,12 @@ CHANGELOG.ignore.md
 # Python bytecode files
 __pycache__/
 *.pyc
+
+# Local PowerShell parity builds, disposable profiles and machine-specific receipts.
+/.local/
+/artifacts/
+/verification/appserver-result.json
+/verification/desktop-actions.txt
+/verification/desktop-backend-processes.json
+/verification/desktop-startup.txt
+/verification/desktop-onboarding.png

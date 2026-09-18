@@ -1,0 +1,45 @@
+name: PowerShell upstream compatibility
+
+on:
+  schedule:
+    - cron: '37 6 * * 1'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Official rust-v tag to inspect (empty means latest published Rust release)
+        type: string
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: powershell-upstream-check
+  cancel-in-progress: false
+
+jobs:
+  portability:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13'
+      - name: Inspect source release and patch applicability
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_TAG: ${{ inputs.tag }}
+        run: |
+          args=()
+          if [[ -n "$REQUESTED_TAG" ]]; then args+=(--tag "$REQUESTED_TAG"); fi
+          python scripts/powershell-parity/check_upstream.py "${args[@]}" --output artifacts/upstream-check.json
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: upstream-compatibility-report
+          path: artifacts/upstream-check.json
+          if-no-files-found: error
+          retention-days: 30
