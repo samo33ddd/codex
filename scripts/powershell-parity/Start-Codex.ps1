@@ -16,15 +16,41 @@ if ($BackendPath) {
     $repo = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')).Path
     $backend = Join-Path $repo 'artifacts\powershell-parity\codex.exe'
 }
+$backendDirectory = Split-Path $backend
+$package = Get-AppxPackage -Name 'OpenAI.Codex' | Sort-Object { [version]$_.Version } -Descending | Select-Object -First 1
+if ($null -eq $package) { throw 'Install the Codex desktop app before using this launcher.' }
+$installedDirectory = Join-Path $package.InstallLocation 'app'
+$installedArchiveHash = (Get-FileHash -LiteralPath (Join-Path $installedDirectory 'resources\app.asar')).Hash
 if (-not $DesktopPath) {
-    $registrationPath = Join-Path (Split-Path $backend) 'desktop-bundle.json'
-    if (-not (Test-Path -LiteralPath $registrationPath -PathType Leaf)) {
-        throw 'Prepared desktop is missing. Run prepare_desktop.py with --backend-dir pointing to this backend directory, or pass -DesktopPath to a verified desktop bundle.'
+    $registrationPath = Join-Path $backendDirectory 'desktop-bundle.json'
+    if (Test-Path -LiteralPath $registrationPath -PathType Leaf) {
+        $registration = Get-Content -LiteralPath $registrationPath -Raw | ConvertFrom-Json
+        $DesktopPath = $registration.desktopPath
+        if ([string]::IsNullOrWhiteSpace($DesktopPath)) {
+            throw "Missing desktopPath in registration: $registrationPath"
+        }
     }
-    $registration = Get-Content -LiteralPath $registrationPath -Raw | ConvertFrom-Json
-    $DesktopPath = $registration.desktopPath
-    if ([string]::IsNullOrWhiteSpace($DesktopPath)) {
-        throw "Missing desktopPath in registration: $registrationPath"
+    $preparedManifest = $null
+    if ($DesktopPath -and (Test-Path -LiteralPath $DesktopPath -PathType Leaf)) {
+        $preparedManifest = Get-Content -LiteralPath (Join-Path (Split-Path $DesktopPath) 'desktop-patch-manifest.json') -Raw | ConvertFrom-Json
+    }
+    if ($null -eq $preparedManifest -or $preparedManifest.sourceAsarSha256 -ne $installedArchiveHash -or
+        $preparedManifest.executableSha256 -ne (Get-FileHash -LiteralPath (Join-Path $installedDirectory 'ChatGPT.exe')).Hash) {
+        $preparer = Join-Path $PSScriptRoot 'prepare_desktop.py'
+        if (-not (Test-Path -LiteralPath $preparer -PathType Leaf)) {
+            throw 'Desktop update tools are missing. Use the launcher from the repository or a complete backend package.'
+        }
+        $python = (Get-Command python -ErrorAction Stop).Source
+        $null = Get-Command node -ErrorAction Stop
+        $output = Join-Path $backendDirectory ('desktop-bundles\app-' + $package.Version + '-' + [guid]::NewGuid().ToString('N'))
+        Write-Host "Preparing Codex desktop $($package.Version)..."
+        $preparationLog = & $python $preparer --source-app $installedDirectory --backend-dir $backendDirectory --output $output
+        if ($LASTEXITCODE -ne 0) {
+            $preparationLog | Out-Host
+            throw 'Desktop preparation failed. The previous bundle is preserved; see the error above.'
+        }
+        $registration = Get-Content -LiteralPath $registrationPath -Raw | ConvertFrom-Json
+        $DesktopPath = $registration.desktopPath
     }
 }
 $desktop = (Resolve-Path -LiteralPath $DesktopPath).Path
@@ -42,17 +68,16 @@ foreach ($component in @('codex-command-runner.exe', 'codex-windows-sandbox-setu
         throw "Missing backend component: $component"
     }
 }
-$package = Get-AppxPackage -Name 'OpenAI.Codex' | Select-Object -First 1
-if ($null -eq $package -or $package.Version -notin $compatibility.desktopVersions) {
-    throw "This launcher supports desktop versions: $($compatibility.desktopVersions -join ', '). Recheck compatibility after an app update."
-}
 $app = Join-Path $package.InstallLocation 'app\ChatGPT.exe'
 if ($DesktopPath) {
     if ((Get-FileHash -LiteralPath $desktop).Hash -ne (Get-FileHash -LiteralPath $app).Hash) {
-        throw 'The custom desktop executable must match the installed, supported desktop version.'
+        throw 'The custom desktop executable must match the installed desktop version. Omit -DesktopPath to prepare it automatically.'
     }
     $manifestPath = Join-Path (Split-Path $desktop) 'desktop-patch-manifest.json'
     $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+    if ($manifest.sourceAsarSha256 -ne $installedArchiveHash) {
+        throw 'This bundle was prepared from a different desktop archive. Omit -DesktopPath to update it automatically.'
+    }
     if ($manifest.backend.version -ne $compatibility.backendVersion) {
         throw 'This desktop does not contain a verified custom backend. Rebuild it with prepare_desktop.py --backend-dir.'
     }
@@ -70,6 +95,9 @@ if ($DesktopPath) {
         throw 'Desktop UI archive does not match the prepared manifest.'
     }
     $app = $desktop
+    if ($manifest.gitLabels -eq 'stock') {
+        Write-Warning 'This desktop uses standard Git labels. PowerShell action classification still uses the custom backend.'
+    }
 }
 $backendPaths = @($backend)
 if ($bundledBackend -and $bundledBackend -ne $backend) { $backendPaths += $bundledBackend }

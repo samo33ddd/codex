@@ -80,6 +80,38 @@ class DesktopBackendTests(unittest.TestCase):
                     json.loads(registration.read_text()),
                     {"desktopPath": str(root / "second bundle/ChatGPT.exe")},
                 )
+                with (
+                    patch(
+                        "prepare_desktop.shutil.copytree",
+                        side_effect=OSError("disk full"),
+                    ),
+                    self.assertRaisesRegex(OSError, "disk full"),
+                ):
+                    prepare(source, root / "failed update", backend)
+                self.assertEqual(
+                    json.loads(registration.read_text()),
+                    {"desktopPath": str(root / "second bundle/ChatGPT.exe")},
+                )
+                with (
+                    patch("prepare_desktop.subprocess.check_output", return_value="[]"),
+                    patch("prepare_desktop.subprocess.run") as patcher,
+                ):
+                    output = root / "future desktop"
+                    manifest = prepare(source, output, backend)
+                    patcher.assert_not_called()
+                    self.assertEqual(manifest["gitLabels"], "stock")
+                    self.assertEqual(manifest["assets"], [])
+                    self.assertEqual(
+                        (output / "resources/app.asar").read_bytes(), archive
+                    )
+                    self.assertEqual(
+                        (output / "resources/codex.exe").read_bytes(),
+                        b"custom backend fixture",
+                    )
+                    self.assertEqual(
+                        json.loads(registration.read_text()),
+                        {"desktopPath": str(output / "ChatGPT.exe")},
+                    )
             self.assertEqual((source / "resources/app.asar").read_bytes(), archive)
 
     def test_bundle_verifies_every_component_before_using_it(self):

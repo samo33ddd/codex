@@ -64,7 +64,12 @@ def package(args):
         compatibility["codeModeHost"],
         args.host_file,
     )
-    for name in ("Start-Codex.ps1", "compatibility.json"):
+    for name in (
+        "Start-Codex.ps1",
+        "compatibility.json",
+        "prepare_desktop.py",
+        "desktop_git_labels.cjs",
+    ):
         shutil.copyfile(HERE / name, output / name)
     for name in ("LICENSE", "NOTICE"):
         shutil.copyfile(ROOT / name, output / name)

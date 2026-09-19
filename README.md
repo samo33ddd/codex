@@ -34,7 +34,7 @@ This fork preserves the history of [openai/codex](https://github.com/openai/code
 | Platform | Windows x64, PowerShell 7 |
 | Rust toolchain | `1.95.0` |
 
-The launcher refuses unlisted desktop versions. A newer Codex CLI release does **not** imply compatibility with a newer desktop app. Version data and the pinned official code-mode host download are recorded in [compatibility.json](scripts/powershell-parity/compatibility.json).
+The launcher follows the installed desktop app. On first use or after an app update, it automatically prepares a new local bundle and verifies its executable, UI archive and custom backend. Desktop version numbers are recorded baselines, not a launch allowlist. The custom backend remains pinned to the version in [compatibility.json](scripts/powershell-parity/compatibility.json); this does not download or build new backend releases.
 
 ## What changes
 
@@ -50,11 +50,11 @@ See [coverage and verification](verification/powershell-parity.md) for precise b
 
 ## Use a candidate build
 
-[PowerShell parity Actions](https://github.com/samo33ddd/codex/actions/workflows/powershell-parity.yml) produces a candidate ZIP after the Windows checks pass. Candidates are not automatically published as releases or declared desktop-compatible. There is no automatic updater.
+[PowerShell parity Actions](https://github.com/samo33ddd/codex/actions/workflows/powershell-parity.yml) produces a candidate ZIP after the Windows checks pass. Candidates are not automatically published as releases. The launcher automatically refreshes its local desktop copy when the installed app changes.
 
 1. Download and extract a candidate artifact. It includes SHA-256 checksums, a build manifest, the launcher, three locally built executables, and the pinned official `codex-code-mode-host.exe`.
-2. From a checkout of this repository, [prepare a local desktop bundle](#local-desktop-bundle-and-git-labels). Pass the extracted candidate directory as `--backend-dir`. Preparation registers the desktop beside the candidate launcher.
-3. In PowerShell 7, validate the prepared desktop and components from the extracted candidate directory:
+2. Install the Codex desktop app, Python 3.11+ and Node.js. Keep the preparation scripts included in the candidate directory.
+3. In PowerShell 7, prepare and validate the desktop and components from the extracted candidate directory:
 
    ```powershell
    .\Start-Codex.ps1 -ValidateOnly
@@ -68,7 +68,7 @@ See [coverage and verification](verification/powershell-parity.md) for precise b
 
 The launcher sets `CODEX_CLI_PATH` only for the new process and checks the actual backend process path. It does not close an existing session or edit account credentials, providers, models, global environment variables, WindowsApps, or app.asar.
 
-The native Windows bootstrap can lose the backend environment override on the normal profile. The launcher therefore uses a prepared desktop bundle with the verified custom backend in its own resources. It reads `desktop-bundle.json` beside the backend package, or uses an explicit `-DesktopPath`. Without a registered bundle, it stops before launching the stock app. The launcher passes `--user-data-dir` explicitly and validates the actual backend even if the initial process exits. On failure, the error includes the expected path, observed backend paths and application log directory.
+The native Windows bootstrap can lose the backend environment override on the normal profile. The launcher therefore uses a prepared desktop bundle with the verified custom backend in its own resources. It reads `desktop-bundle.json` beside the backend package and compares the registered source archive and executable hashes with the installed app. If the bundle is missing or outdated, it prepares a new directory under `desktop-bundles` beside the backend. Successful preparation updates the registration atomically; failed preparation preserves it and stops the launch. Existing bundles are retained. An explicit `-DesktopPath` selects a fixed bundle and must match the installed app. The launcher passes `--user-data-dir` explicitly and validates the actual backend even if the initial process exits.
 
 **Rollback:** close this instance and start Codex from its usual Start-menu shortcut. The stock installation is unchanged.
 
@@ -76,7 +76,7 @@ The native Windows bootstrap can lose the backend environment override on the no
 
 The preparation script creates a separate local copy of the installed desktop and includes all four verified backend executables. Git activity labels cover literal `status`, `diff`, `log`, `show`, `branch`, `remote`, `rev-parse`, `ls-remote` and `ls-files` commands with supported flags and selected `-c`/`-C` options. Semicolon and newline chains of Git commands receive a Git summary; supported mixtures with file reads or `rg` explicitly mention other commands. The original command and output remain available by expanding the row. Unsupported syntax, errors and interruptions keep the standard presentation. These labels do not change backend classifications or permissions.
 
-For the pinned desktop version, with Node.js and Python available:
+Ordinary launches update automatically. To prepare a bundle in a chosen directory, with Node.js and Python available:
 
 ```powershell
 $app = (Get-AppxPackage -Name OpenAI.Codex).InstallLocation + '\app'
@@ -86,9 +86,9 @@ python scripts/powershell-parity/prepare_desktop.py --source-app $app --backend-
 pwsh -NoProfile -File scripts/powershell-parity/Start-Codex.ps1
 ```
 
-Preparation requires a new output directory and checks the exact SHA-256 of the three supported UI assets and each backend component against the backend build manifest. It records the component hashes, changed asset hashes and both ASAR hashes in `desktop-patch-manifest.json`. After successful preparation it atomically writes `desktop-bundle.json` in the backend directory, selecting the new bundle for ordinary launches. The launcher verifies the desktop manifest before starting, and checks that the running backend is a verified component. The installed desktop is not modified. A desktop update requires a new compatibility review; this is a local bundle, not an official plugin or a redistributable desktop build.
+Preparation requires a new output directory and verifies each backend component against the backend build manifest. Git label overlays use exact SHA-256 checks for the supported UI assets in desktop versions `26.911.7940.0` and `26.915.4065.0`. If a future desktop has unknown assets, preparation retains its standard Git labels and the launcher prints a warning. PowerShell read/search/list classifications still come from the custom backend. Preparation records component hashes, changed asset hashes, both ASAR hashes and the Git label mode in `desktop-patch-manifest.json`. After successful preparation it atomically writes `desktop-bundle.json` in the backend directory. The launcher verifies the desktop manifest before starting and checks the running backend path. The installed desktop is not modified. Future desktop/backend protocol changes can still require a backend update; automatic copying is not a guarantee of compatibility with every future release.
 
-`-UserDataPath` provides a separate native browser and Electron profile for testing. Ordinary launches retain the normal profile. Local verification uses `test_launcher.ps1`, `test_prepare_desktop.py` and `test_desktop_git_labels.cjs`; the latter requires the matching assets extracted under `.local/desktop`.
+`-UserDataPath` provides a separate native browser and Electron profile for testing. Ordinary launches retain the normal profile. `-ValidateOnly` prepares an update if needed and checks it without starting the app. Local verification uses `test_launcher.ps1`, `test_prepare_desktop.py` and `test_desktop_git_labels.cjs`; the latter requires the matching assets extracted under `.local/desktop`. Add `--current` to also exercise the `26.915.4065.0` assets extracted under `.local/desktop-current`.
 
 ## Build and verify locally
 
@@ -125,7 +125,7 @@ This upstream tag normalizes local workspace package versions in Cargo.lock duri
 
 The [upstream compatibility workflow](https://github.com/samo33ddd/codex/actions/workflows/powershell-upstream.yml) runs every Monday at 06:37 UTC and can be started manually with a source tag. It checks patch applicability using an isolated Git index. It never checks out or executes candidate source, rewrites a branch, pushes, or updates a desktop installation. Its summary and JSON artifact distinguish an applicable patch, an already-applied patch, and a conflict. A conflict is a report outcome, not a claim that tests passed.
 
-For a new desktop version:
+For a backend upgrade, or a desktop update that changes its backend protocol:
 
 1. Identify its actual bundled backend version and confirm the override mechanism still exists.
 2. Create a new version branch from the matching official source tag; cherry-pick the backend patch and adapt conflicts.

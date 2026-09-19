@@ -7,6 +7,7 @@ import shutil
 import struct
 import subprocess
 import tempfile
+import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -126,12 +127,29 @@ def prepare(source, output, backend_dir):
     backend = verified_backend_files(backend_dir)
     archive = source / "resources/app.asar"
     source_hash = digest(archive)
+    executable_hash = digest(source / "ChatGPT.exe")
     patcher = HERE / "desktop_git_labels.cjs"
-    names = json.loads(
-        subprocess.check_output(["node", str(patcher), "--list-assets"], text=True)
-    )
     header, data_start = archive_header(archive)
     entries = dict(archive_files(header))
+    names = json.loads(
+        subprocess.check_output(
+            ["node", str(patcher), "--list-assets", "--installed"],
+            input=json.dumps(
+                [
+                    Path(name).name
+                    for name in entries
+                    if name.startswith("webview/assets/")
+                ]
+            ),
+            text=True,
+        )
+    )
+    changes = {"files": []}
+    if not names:
+        print(
+            "Git label overlay is unavailable for this desktop; using standard Git labels.",
+            file=sys.stderr,
+        )
     with tempfile.TemporaryDirectory(prefix="codex-desktop-assets-") as temporary:
         temporary = Path(temporary)
         original_dir, patched_dir = temporary / "original", temporary / "patched"
@@ -143,12 +161,13 @@ def prepare(source, output, backend_dir):
                 item = entries[f"webview/assets/{name}"]
                 stream.seek(data_start + int(item["offset"]))
                 (original_dir / name).write_bytes(stream.read(item["size"]))
-        subprocess.run(
-            ["node", str(patcher), str(original_dir), str(patched_dir)], check=True
-        )
-        changes = json.loads(
-            (patched_dir / "desktop_git_labels_manifest.json").read_text()
-        )
+        if names:
+            subprocess.run(
+                ["node", str(patcher), str(original_dir), str(patched_dir)], check=True
+            )
+            changes = json.loads(
+                (patched_dir / "desktop_git_labels_manifest.json").read_text()
+            )
         replacements = {
             f"webview/assets/{name}": (patched_dir / name).read_bytes()
             for name in names
@@ -160,17 +179,24 @@ def prepare(source, output, backend_dir):
             shutil.copyfile(backend_dir / entry["file"], destination)
             if digest(destination) != entry["sha256"]:
                 raise ValueError(f"Copied backend SHA-256 mismatch: {entry['file']}")
-        new_archive = output / "resources/app.asar.new"
-        rewrite_archive(archive, new_archive, replacements)
-        new_archive.replace(output / "resources/app.asar")
-    if digest(archive) != source_hash:
+        if replacements:
+            new_archive = output / "resources/app.asar.new"
+            rewrite_archive(archive, new_archive, replacements)
+            new_archive.replace(output / "resources/app.asar")
+    if (
+        digest(archive) != source_hash
+        or digest(source / "ChatGPT.exe") != executable_hash
+    ):
         raise ValueError("Installed application changed during packaging")
+    if digest(output / "ChatGPT.exe") != executable_hash:
+        raise ValueError("Copied desktop executable SHA-256 mismatch")
     manifest = {
         "sourceApp": str(source),
         "sourceAsarSha256": source_hash,
         "patchedAsarSha256": digest(output / "resources/app.asar"),
         "executableSha256": digest(output / "ChatGPT.exe"),
         "assets": changes["files"],
+        "gitLabels": "patched" if names else "stock",
         "backend": backend,
         "scope": "Local desktop and backend bundle; installed application is unchanged",
     }

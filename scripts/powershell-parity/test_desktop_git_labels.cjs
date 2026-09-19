@@ -4,7 +4,7 @@ const os = require('node:os');
 const path = require('node:path');
 const vm = require('node:vm');
 const {spawnSync} = require('node:child_process');
-const {patchAssets, patchSource, gitOperation, gitLabel, files} = require('./desktop_git_labels.cjs');
+const {patchAssets, patchSource, gitOperation, gitLabel, files, currentFiles, supportedAssets} = require('./desktop_git_labels.cjs');
 
 const accepted = [
   ['git status', 'status'],
@@ -62,6 +62,35 @@ const base = path.resolve(__dirname, '../../.local/desktop');
 const source = Object.fromEntries(Object.values(files).map(name =>
   [name, fs.readFileSync(path.join(base, name), 'utf8')]));
 const patched = patchAssets(source);
+assert.deepEqual(supportedAssets(['conversation-blocks-future.js']), []);
+assert.deepEqual(supportedAssets(Object.values(currentFiles)), Object.values(currentFiles));
+if (process.argv.includes('--current')) {
+  const currentSource = Object.fromEntries(Object.values(currentFiles).map(name =>
+    [name, fs.readFileSync(path.join(__dirname, '../../.local/desktop-current', name), 'utf8')]));
+  const currentPatched = patchAssets(currentSource);
+  for (const name of Object.values(currentFiles)) {
+    const check = spawnSync(process.execPath, ['--check', '--input-type=module'],
+      {input: currentPatched[name], encoding: 'utf8'});
+    assert.equal(check.status, 0, check.stderr);
+    assert.throws(() => patchSource(name, currentSource[name] + ' '), /baseline mismatch/);
+  }
+  const activeSource = currentPatched[currentFiles.active];
+  const activeBody = activeSource.slice(activeSource.indexOf('function N('), activeSource.indexOf('}var P;') + 1);
+  const helpers = activeSource.slice(0, activeSource.indexOf('import'));
+  const active = vm.runInNewContext(`${helpers}\n${activeBody}\nN`, {
+    P: {commandRanWithDetail: 'raw'},
+  });
+  const sample = {callId: 'current', parsedCmd: {type: 'unknown', cmd: 'git status', isFinished: true}, executionStatus: 'completed', output: {exitCode: 0}};
+  assert.equal(active(sample).message.defaultMessage, 'Inspected Git status');
+  assert.equal(active({...sample, executionStatus: 'failed', output: {exitCode: 1}}).message, 'raw');
+  const currentRow = isolatedFunction(currentPatched[currentFiles.row], 'hb', {
+    Tb: {c: size => Array(size)}, qf: () => false, gb: () => false, Sb: () => null,
+    X: {jsx: (type, props) => ({type, props})},
+  });
+  assert.equal(currentRow(rowProps('completed')).props.children, 'Inspected Git diff');
+  assert.equal(currentRow(rowProps('inProgress')).props.children, 'Inspecting Git diff');
+  console.log('Current desktop Git labels and syntax: OK');
+}
 const listing = spawnSync(process.execPath, [path.join(__dirname, 'desktop_git_labels.cjs'), '--list-assets'],
   {encoding: 'utf8'});
 assert.equal(listing.status, 0, listing.stderr);

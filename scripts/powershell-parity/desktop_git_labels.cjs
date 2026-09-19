@@ -9,11 +9,24 @@ const files = {
   row: 'conversation-blocks-8a28edabd83b.js',
   grouping: 'agent-activity-item-3f8bbac7aaf9.js',
 };
+const currentFiles = {
+  active: 'active-tool-activity-label-d0842236ddf3.js',
+  row: 'conversation-blocks-801b796bbe8f.js',
+  grouping: 'agent-activity-item-998595b44e9a.js',
+};
 const baselineSha256 = {
   [files.active]: '113932892d6616d535a9278fe7d9922adacc37fa163386b5c5bf37851d3e3d85',
   [files.row]: 'd6384cf380c36a77bb51c35b9c9c48be0ed9f51e1caaf3d08079a5736c94f282',
   [files.grouping]: '1a401d7bdc6655df97a6d1e6768bad9b5aff26cd3cc9f2e8d7108a59bfe82ffd',
+  [currentFiles.active]: '8933fbad598f2514178164c6605bc7dfd131e5653bfc3e9b898d4303d7798cc1',
+  [currentFiles.row]: '392f0683059d50069ef44c8e9785eb7a35e73c23152a60d569c2b010c6be53ff',
+  [currentFiles.grouping]: '116193979a86470b9f539d1b643b4c7d2899ab81aef8413dccbbc19862d41fec',
 };
+
+function supportedAssets(names) {
+  return [files, currentFiles].map(Object.values).find(group =>
+    group.every(name => names.includes(name))) || [];
+}
 
 // A bounded PowerShell literal subset: quotes and ;/newlines are understood,
 // while expansion, pipes, redirection and control flow keep the raw fallback.
@@ -174,21 +187,23 @@ function patchSource(name, source) {
   if (sha256(source) !== baselineSha256[name]) {
     throw new Error(`Desktop baseline mismatch: ${name}`);
   }
-  if (name === files.active) {
-    const marker = 'function P(e){let t;t=e.executionStatus===`interrupted`?';
-    const replacement = 'function P(e){let g=e.parsedCmd.type===`unknown`&&(!e.parsedCmd.isFinished||e.executionStatus===`completed`)&&(e.output?.exitCode==null||e.output.exitCode===0)?gitOperation(e.parsedCmd.cmd):null;if(g){let s=gitLabel(g,e.parsedCmd.isFinished);return{activityKey:e.callId,icon:`run-command`,message:{id:`desktopGitLabel.${g}.${e.parsedCmd.isFinished?`done`:`active`}`,defaultMessage:s,description:`Git command presentation`}}}let t;t=e.executionStatus===`interrupted`?';
+  if (name === files.active || name === currentFiles.active) {
+    const functionName = name === files.active ? 'P' : 'N';
+    const marker = `function ${functionName}(e){let t;t=e.executionStatus===\`interrupted\`?`;
+    const replacement = `function ${functionName}(e){` + 'let g=e.parsedCmd.type===`unknown`&&(!e.parsedCmd.isFinished||e.executionStatus===`completed`)&&(e.output?.exitCode==null||e.output.exitCode===0)?gitOperation(e.parsedCmd.cmd):null;if(g){let s=gitLabel(g,e.parsedCmd.isFinished);return{activityKey:e.callId,icon:`run-command`,message:{id:`desktopGitLabel.${g}.${e.parsedCmd.isFinished?`done`:`active`}`,defaultMessage:s,description:`Git command presentation`}}}let t;t=e.executionStatus===`interrupted`?';
     return helper + replaceOne(source, marker, replacement, name);
   }
-  if (name === files.row) {
+  if (name === files.row || name === currentFiles.row) {
     const marker = 'switch(n.type){case`format`:case`test`:case`lint`:case`noop`:case`unknown`:{if(a){';
     const replacement = 'let gitRowOperation=n.type===`unknown`&&!c&&!l&&!o&&(!a?p===`completed`:p===`inProgress`)?gitOperation(n.cmd):null;switch(n.type){case`format`:case`test`:case`lint`:case`noop`:case`unknown`:{if(gitRowOperation)return(0,X.jsx)(`span`,{className:f,children:gitLabel(gitRowOperation,!a)});if(a){';
     return helper + replaceOne(source, marker, replacement, name);
   }
-  if (name === files.grouping) {
+  if (name === files.grouping || name === currentFiles.grouping) {
     // A recognized Git command becomes an individual activity row, so a
     // collapsed generic "N commands" group cannot hide its specific label.
-    const marker = 'case`exec`:case`patch`:return $(gn(e),a(e)?`standalone`:`groupable`);';
-    const replacement = 'case`exec`:case`patch`:return $(gn(e),e.type===`exec`&&e.parsedCmd.type===`unknown`&&gitOperation(e.parsedCmd.cmd)?`standalone`:a(e)?`standalone`:`groupable`);';
+    const [convert, standalone] = name === files.grouping ? ['gn', 'a'] : ['vn', 'Ve'];
+    const marker = 'case`exec`:case`patch`:return $(' + convert + '(e),' + standalone + '(e)?`standalone`:`groupable`);';
+    const replacement = 'case`exec`:case`patch`:return $(' + convert + '(e),e.type===`exec`&&e.parsedCmd.type===`unknown`&&gitOperation(e.parsedCmd.cmd)?`standalone`:' + standalone + '(e)?`standalone`:`groupable`);';
     return helper + replaceOne(source, marker, replacement, name);
   }
   throw new Error(`Unexpected desktop chunk: ${name}`);
@@ -203,7 +218,9 @@ function sha256(source) {
 function patchAssets(input, outputDir) {
   if (typeof input !== 'string') {
     const output = {};
-    for (const name of Object.values(files)) {
+    const names = supportedAssets(Object.keys(input));
+    if (!names.length) throw new Error('Missing desktop chunks for a supported baseline');
+    for (const name of names) {
       if (typeof input[name] !== 'string') throw new Error(`Missing desktop chunk: ${name}`);
       output[name] = patchSource(name, input[name]);
     }
@@ -212,24 +229,26 @@ function patchAssets(input, outputDir) {
   if (typeof outputDir !== 'string' || path.resolve(input) === path.resolve(outputDir)) {
     throw new Error('Separate input and output directories are required');
   }
-  const original = Object.fromEntries(Object.values(files).map(name =>
+  const names = supportedAssets(fs.readdirSync(input));
+  const original = Object.fromEntries(names.map(name =>
     [name, fs.readFileSync(path.join(input, name), 'utf8')]));
   const patched = patchAssets(original);
-  const manifest = {files: Object.values(files).map(name => ({
+  const manifest = {files: names.map(name => ({
     name, beforeSha256: sha256(original[name]), afterSha256: sha256(patched[name]),
   }))};
   fs.mkdirSync(outputDir, {recursive: true});
-  for (const name of Object.values(files)) fs.writeFileSync(path.join(outputDir, name), patched[name]);
+  for (const name of names) fs.writeFileSync(path.join(outputDir, name), patched[name]);
   fs.writeFileSync(path.join(outputDir, 'desktop_git_labels_manifest.json'),
     JSON.stringify(manifest, null, 2) + '\n');
   return manifest;
 }
 
-module.exports = {patchAssets, patchSource, gitOperation, gitLabel, files};
+module.exports = {patchAssets, patchSource, gitOperation, gitLabel, files, currentFiles, supportedAssets};
 if (require.main === module) {
   const [input, output] = process.argv.slice(2);
-  if (input === '--list-assets' && output === undefined) {
-    console.log(JSON.stringify(Object.values(files)));
+  if (input === '--list-assets') {
+    const names = output === '--installed' ? supportedAssets(JSON.parse(fs.readFileSync(0, 'utf8'))) : Object.values(files);
+    console.log(JSON.stringify(names));
   } else if (!input || !output) {
     console.error('Usage: node desktop_git_labels.cjs input-dir output-dir');
     process.exitCode = 2;
