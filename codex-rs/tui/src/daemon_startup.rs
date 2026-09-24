@@ -59,6 +59,11 @@ pub(super) fn config_exclusion(
     if !cli_kv_overrides
         .iter()
         .all(|(key, value)| match key.as_str() {
+            "model_reasoning_effort" => value.as_str().is_some_and(|effort| {
+                effort
+                    .parse::<codex_protocol::openai_models::ReasoningEffort>()
+                    .is_ok()
+            }),
             "suppress_unstable_features_warning" | "tui.fullscreen_transcript" => value.is_bool(),
             "tui" => value.as_table().is_some_and(|tui| {
                 tui.len() == 1

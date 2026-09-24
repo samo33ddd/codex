@@ -63,3 +63,26 @@ warnings and the expanded initializer argument-count warning remain.
 
 Final CLI build passed in 13m 54s from source commit c5d9b253ab7481ec3e9add8a272bd9ac24873304. Staged codex.exe SHA256: 9CDA3D4428D2D8EF6D8DE9D388EDB7B8136E40C06C2377BD14C48A9A353DC0D9. The package was installed through daemon update --from-cli --yes; the installed SHA matches. Bootstrap passed and the managed daemon is running.
 Live code-mode returned T003_CODEMODE_LIVE_PASS (session 01a0d1fc-239e-75e2-aba2-071046d52a2e). The code-mode host was a direct child of the installed daemon. A 120-second window watch spanning bootstrap, MCP startup and code-mode found no new visible console windows; this does not detect new tabs inside an existing Terminal window. A second live TUI used the exact installed managed CLI (verified executable path), gpt-6-astra/low, and returned T003_MANAGED_CLIENT_PASS (session 01a0d200-3be8-7e10-b872-318e9be0f7cb). The isolated A/B/public-fork test passed all six checks; three SessionStart recorders stopped their turns before inference. The config and rollout sentinel scan ran after stopping the isolated daemon. Internal-child ownership remains covered by the focused core test, not this runtime probe. Orca was restarted in background with the managed CLI command override and --no-daemon removed; settings were read back from the restarted runtime. Compact runtime evidence is in daemon-hook-owner-runtime.json.
+
+## TUI shared-agent availability with explicit effort (2026-09-24)
+
+A normal Orca Codex launch with `-c model_reasoning_effort=low/max` selected
+an embedded server, so `/agents` reported Shared agents unavailable. Permit
+valid ReasoningEffort values in the existing daemon override allowlist;
+arbitrary and mixed unsupported overrides still exclude daemon use.
+
+Nine focused daemon-startup tests passed (one existing subprocess-leak flag),
+with 5423 unrelated tests skipped. Scoped formatting and the CLI build passed.
+Independent review of the frozen two-file diff found no actionable P1/P2.
+The live PTY resumed with GPT-6-Astra/low and received `LIVE_TUI_API_OK` through
+send_message_to_thread while open; the screen showed the source task attribution.
+The matching native turn_context retained gpt-6-astra/low. No prompt paste or
+Enter injection was used for this API check.
+
+Orca now launches the verified client at
+`E:/codex-build-tools/packages/codex-daemon-thread-compat/bin/codex.exe`.
+SHA256: EB18A520B47DEFD49307214E339BC90D80F65A1481DE9009EB860BCE98CB2541.
+Only the client changed; the compatible shared daemon remained running.
+Evidence: E:/tmp/orca-daemon-threads-delivery/tui-effort-focused-tests.log,
+tui-effort-independent-review.json, tui-thread-api-screen.txt and
+tui-effort-client-install.json.
