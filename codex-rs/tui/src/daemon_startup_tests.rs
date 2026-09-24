@@ -34,6 +34,10 @@ fn audited_overrides_allow_daemon_without_allowing_arbitrary_config() {
         ("tui={fullscreen_transcript='true'}", false),
         ("tui={fullscreen_transcript=true,animations=false}", false),
         ("features={}", false),
+        ("model_reasoning_effort='low'", true),
+        ("model_reasoning_effort='max'", true),
+        ("model_reasoning_effort=''", false),
+        ("model_reasoning_effort=1", false),
         ("model='test'", false),
     ] {
         let overrides = codex_utils_cli::CliConfigOverrides {
@@ -53,6 +57,24 @@ fn audited_overrides_allow_daemon_without_allowing_arbitrary_config() {
             "{raw}"
         );
     }
+
+    let overrides = codex_utils_cli::CliConfigOverrides {
+        raw_overrides: vec![
+            "model_reasoning_effort='low'".to_string(),
+            "model='test'".to_string(),
+        ],
+    }
+    .parse_overrides()
+    .unwrap();
+    assert_eq!(
+        daemon_startup::config_exclusion(
+            &overrides,
+            &LoaderOverrides::default(),
+            /*strict_config*/ false,
+            /*bypass_hook_trust*/ false,
+        ),
+        Some("command-line configuration overrides (-c, --enable, --disable, or --search)")
+    );
 }
 
 #[test]
