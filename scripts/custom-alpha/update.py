@@ -76,10 +76,20 @@ def resolve_version_conflict(path, version):
     Path(path).write_text("".join(out), encoding="utf-8", newline="")
 
 
-def _run(args, cwd=None, env=None, check=True):
-    p = subprocess.run(args, cwd=cwd, env=env, text=True, stdout=subprocess.PIPE,
-                       stderr=subprocess.STDOUT, errors="replace",
-                       creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+def _run(args, cwd=None, env=None, check=True, file_output=False):
+    flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    if file_output:
+        # A daemon may inherit stdout; a file handle cannot keep run() waiting for EOF.
+        with tempfile.TemporaryFile(mode="w+b") as output:
+            p = subprocess.run(args, cwd=cwd, env=env, stdout=output, stderr=subprocess.STDOUT,
+                               creationflags=flags)
+            end = output.tell()
+            output.seek(max(0, end - 8192))
+            captured = output.read().decode("utf-8", "replace")
+        p = subprocess.CompletedProcess(args, p.returncode, stdout=captured)
+    else:
+        p = subprocess.run(args, cwd=cwd, env=env, text=True, stdout=subprocess.PIPE,
+                           stderr=subprocess.STDOUT, errors="replace", creationflags=flags)
     if check and p.returncode:
         raise UpdateError("command", f"{Path(str(args[0])).name} failed ({p.returncode}): {p.stdout[-800:]}")
     return p
@@ -377,7 +387,8 @@ class Ops:
         for home in self.c["codexHomes"]:
             env = os.environ.copy()
             env["CODEX_HOME"] = str(Path(home).resolve())
-            p = _run([str(exe), "app-server", "daemon", "update", "--from-cli", "--yes"], cwd=candidate, env=env, check=False)
+            p = _run([str(exe), "app-server", "daemon", "update", "--from-cli", "--yes"],
+                     cwd=candidate, env=env, check=False, file_output=True)
             if p.returncode:
                 raise UpdateError("activate", f"official daemon update failed for {Path(home).name}: {p.stdout[-500:]}")
         manifest = json.loads((candidate / "candidate.json").read_text(encoding="utf-8"))
