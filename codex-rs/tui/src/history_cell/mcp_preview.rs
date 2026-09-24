@@ -3,13 +3,13 @@
 use super::McpToolCallCell;
 use super::NodeReplExecOutput;
 use super::result::McpResultKind;
-use crate::orca_presentation::codex_tui_action;
 use crate::history_cell::activity_preview::DETAIL_PREVIEW_LINES;
 use crate::history_cell::activity_preview::clipped_line;
 use crate::live_wrap::take_prefix_by_width;
 use crate::motion::MotionMode;
 use crate::motion::ReducedMotionIndicator;
 use crate::motion::activity_indicator;
+use crate::orca_presentation::mcp_action_preview;
 use crate::style::accent_color;
 use crate::terminal_hyperlinks::HyperlinkLine;
 use ratatui::style::Stylize;
@@ -20,7 +20,7 @@ use std::collections::VecDeque;
 impl McpToolCallCell {
     pub(super) fn compact_mcp_lines(&self, width: u16) -> Vec<HyperlinkLine> {
         let status = self.success();
-        let semantic = codex_tui_action(
+        let semantic = mcp_action_preview(
             &self.invocation.server,
             &self.invocation.tool,
             self.invocation.arguments.as_ref(),
@@ -41,22 +41,33 @@ impl McpToolCallCell {
         let title = semantic
             .as_ref()
             .map(|summary| summary.action.clone())
-            .unwrap_or_else(|| self
-            .invocation
-            .arguments
-            .as_ref()
-            .filter(|_| self.result_kind() == McpResultKind::NodeRepl)
-            .and_then(|arguments| arguments.get("title"))
-            .and_then(serde_json::Value::as_str)
-            .map(|title| title.split_whitespace().collect::<Vec<_>>().join(" "))
-            .filter(|title| !title.is_empty())
-            .unwrap_or_else(|| format!("{}.{}", self.invocation.server, self.invocation.tool)));
+            .unwrap_or_else(|| {
+                self.invocation
+                    .arguments
+                    .as_ref()
+                    .filter(|_| self.result_kind() == McpResultKind::NodeRepl)
+                    .and_then(|arguments| arguments.get("title"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(|title| title.split_whitespace().collect::<Vec<_>>().join(" "))
+                    .filter(|title| !title.is_empty())
+                    .unwrap_or_else(|| {
+                        format!("{}.{}", self.invocation.server, self.invocation.tool)
+                    })
+            });
         let mut lines = vec![clipped_line(
             Line::from(vec![
                 marker,
                 " ".into(),
-                if semantic.is_some() { "".into() } else { verb.bold() },
-                if semantic.is_some() { "".into() } else { " ".into() },
+                if semantic.is_some() {
+                    "".into()
+                } else {
+                    verb.bold()
+                },
+                if semantic.is_some() {
+                    "".into()
+                } else {
+                    " ".into()
+                },
                 title.fg(accent_color()),
             ]),
             width,

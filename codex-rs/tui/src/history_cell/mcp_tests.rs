@@ -215,8 +215,17 @@ fn codex_tui_send_message_uses_prompt_without_exposing_thread_id() {
           └ «Please summarize the latest status»
         "###
     );
-    assert!(display.iter().all(|line| !line.to_string().contains(thread_id)));
-    let raw = cell.raw_lines().iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
+    assert!(
+        display
+            .iter()
+            .all(|line| !line.to_string().contains(thread_id))
+    );
+    let raw = cell
+        .raw_lines()
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(raw.contains(thread_id));
     assert!(raw.contains(prompt));
 
@@ -238,9 +247,79 @@ fn codex_tui_send_message_uses_prompt_without_exposing_thread_id() {
     );
     let narrow = failed.display_lines(/*width*/ 32);
     assert!(narrow.iter().all(|line| line.width() <= 32));
-    let visible = narrow.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
+    let visible = narrow
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(visible.contains("permission denied"));
     assert!(!visible.contains(thread_id));
+}
+
+#[test]
+fn tavily_compact_preview_uses_wire_arguments_and_keeps_result_and_errors() {
+    let query = "Rust PowerShell call operator parsing";
+    let raw_result = r#"{"results":[{"title":"Parser notes","url":"https://example.com/parser","content":"Full retained page content"}]}"#;
+    let mut search = new_active_mcp_tool_call(
+        "tavily-search".into(),
+        McpInvocation {
+            server: "codex_apps".into(),
+            tool: "tavily.tavily_search".into(),
+            arguments: Some(json!({"query": query})),
+        },
+        /*animations_enabled*/ false,
+    );
+    search.complete(
+        Duration::ZERO,
+        Ok(result(vec![json!({"type": "text", "text": raw_result})])),
+    );
+
+    let display = search
+        .display_lines(/*width*/ 100)
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(display.contains("веб-поиск"));
+    assert!(display.contains(&format!("«{query}»")));
+    assert!(!display.contains("results"));
+    assert!(!display.contains("Full retained page content"));
+
+    let transcript = search
+        .transcript_lines(/*width*/ 200)
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(transcript.contains(raw_result));
+    assert!(transcript.contains(query));
+
+    let mut failed_extract = new_active_mcp_tool_call(
+        "tavily-extract".into(),
+        McpInvocation {
+            server: "codex_apps".into(),
+            tool: "tavily.tavily_extract".into(),
+            arguments: Some(json!({"urls": ["https://example.com/parser"]})),
+        },
+        /*animations_enabled*/ false,
+    );
+    failed_extract.complete(
+        Duration::ZERO,
+        Ok(CallToolResult {
+            is_error: Some(true),
+            ..result(vec![
+                json!({"type": "text", "text": "Tavily extraction failed: API timeout"}),
+            ])
+        }),
+    );
+    let failed_display = failed_extract
+        .display_lines(/*width*/ 100)
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(failed_display.contains("извлечение страниц"));
+    assert!(failed_display.contains("Tavily extraction failed: API timeout"));
 }
 
 #[test]

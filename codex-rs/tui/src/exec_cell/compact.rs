@@ -23,6 +23,9 @@ impl ExecCell {
         let [call] = self.group.calls.as_slice() else {
             return false;
         };
+        if orca_cli_action(&call.command).is_some() {
+            return true;
+        }
         if !self
             .group
             .details
