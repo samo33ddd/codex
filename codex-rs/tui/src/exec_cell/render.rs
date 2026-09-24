@@ -12,6 +12,8 @@ use crate::history_cell::plain_lines;
 use crate::motion::MotionMode;
 use crate::motion::ReducedMotionIndicator;
 use crate::motion::activity_indicator;
+use crate::orca_presentation::orca_cli_action;
+use crate::orca_presentation::safe_output_preview;
 use crate::render::highlight::highlight_bash_to_lines;
 use crate::render::line_utils::line_to_static;
 use crate::style::accent_color;
@@ -453,6 +455,62 @@ impl ExecCell {
         let [call] = &self.group.calls.as_slice() else {
             panic!("Expected exactly one call in a command display cell");
         };
+        if let Some(action) = orca_cli_action(&call.command) {
+            let success = call
+                .duration
+                .and_then(|_| call.output.as_ref().map(|output| output.exit_code == 0));
+            let (marker, status) = match success {
+                Some(true) => ("•".green().bold(), "Успешно"),
+                Some(false) => ("•".red().bold(), "Ошибка"),
+                None => (
+                    activity_marker(call.start_time, self.animations_enabled()),
+                    "Выполняется",
+                ),
+            };
+            let header = Line::from(vec![
+                marker,
+                " ".into(),
+                status.bold(),
+                " · ".dim(),
+                action.action.clone().fg(accent_color()),
+            ]);
+            let mut lines = adaptive_wrap_hyperlink_lines(
+                &[HyperlinkLine::new(header)],
+                RtOptions::new(usize::from(width).max(1)).subsequent_indent("    ".into()),
+            );
+            let had_detail = action.detail.is_some();
+            let detail = action.detail.or_else(|| {
+                (!action.help && success == Some(true))
+                    .then(|| {
+                        call.output
+                            .as_ref()?
+                            .lines()
+                            .next()
+                            .and_then(|line| safe_output_preview(&line))
+                    })
+                    .flatten()
+            });
+            if let Some(detail) = detail {
+                let wrapped = adaptive_wrap_hyperlink_lines(
+                    &[HyperlinkLine::new(Line::from(format!("«{detail}»").dim()))],
+                    RtOptions::new(usize::from(width).saturating_sub(4).max(1)),
+                );
+                lines.extend(prefix_hyperlink_lines(wrapped, "  └ ".dim(), "    ".into()));
+            }
+            if let Some(output) = call.output.as_ref().filter(|output| output.exit_code != 0) {
+                let errors = output_preview_lines(output, usize::from(width).saturating_sub(4));
+                lines.extend(prefix_hyperlink_lines(errors, "  └ ".dim(), "    ".into()));
+            }
+            return CommandDisplay {
+                lines,
+                hidden_details: action.help
+                    || had_detail
+                    || call
+                        .output
+                        .as_ref()
+                        .is_some_and(|output| output.line_counts().0 > 0),
+            };
+        }
         let layout = EXEC_DISPLAY_LAYOUT;
         let success = call
             .duration
@@ -1356,5 +1414,74 @@ mod tests {
             rendered.concat().contains(url),
             "expected the complete URL, got: {rendered:?}"
         );
+    }
+
+    #[test]
+    fn orca_help_uses_semantic_preview_but_keeps_full_transcript() {
+        let executable = r"C:\Program Files\Orca\orca.exe";
+        let cell = ExecCell::new(
+            ExecCall {
+                call_id: "orca-help".into(),
+                command: vec![
+                    executable.into(),
+                    "orchestration".into(),
+                    "worker-start".into(),
+                    "--help".into(),
+                ],
+                parsed: Vec::new(),
+                output: Some(CommandOutput::new(
+                    0,
+                    "Usage: worker-start [OPTIONS]".into(),
+                )),
+                source: ExecCommandSource::Agent,
+                start_time: None,
+                duration: Some(std::time::Duration::ZERO),
+                interaction_input: None,
+            },
+            /*animations_enabled*/ false,
+        );
+        let preview = visible_lines(cell.compact_hyperlink_lines(/*width*/ 80))
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        insta::assert_snapshot!(preview, @r"• Успешно · справка: orca orchestration worker-start");
+        let transcript = cell
+            .transcript_lines(/*width*/ 160)
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(transcript.contains(executable));
+        assert!(transcript.contains("Usage: worker-start"));
+
+        let failure = ExecCell::new(
+            ExecCall {
+                call_id: "orca-send".into(),
+                command: vec![
+                    "orca".into(),
+                    "orchestration".into(),
+                    "send".into(),
+                    "--subject".into(),
+                    "Status update".into(),
+                ],
+                parsed: Vec::new(),
+                output: Some(CommandOutput::new(1, "permission denied".into())),
+                source: ExecCommandSource::Agent,
+                start_time: None,
+                duration: Some(std::time::Duration::ZERO),
+                interaction_input: None,
+            },
+            /*animations_enabled*/ false,
+        );
+        let narrow = visible_lines(failure.compact_hyperlink_lines(/*width*/ 32));
+        assert!(narrow.iter().all(|line| line.width() <= 32));
+        let failure_preview = narrow
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(failure_preview.contains("Ошибка"));
+        assert!(failure_preview.contains("permission denied"));
     }
 }

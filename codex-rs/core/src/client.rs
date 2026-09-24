@@ -32,6 +32,9 @@ use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 
+#[path = "client_tool_metadata.rs"]
+mod tool_metadata;
+
 use crate::CodexResponsesHeaders;
 use async_channel::Sender;
 use codex_api::AgentIdentityTelemetry;
@@ -266,6 +269,7 @@ pub struct ModelClient {
     event_sender: Option<Sender<ProtocolEvent>>,
     http_client_factory: HttpClientFactory,
     restored_history: bool,
+    request_contributors: Vec<Arc<dyn codex_extension_api::ModelRequestContributor>>,
 }
 
 /// A turn-scoped streaming session created from a [`ModelClient`].
@@ -496,6 +500,7 @@ impl ModelClient {
         attestation_provider: Option<Arc<dyn AttestationProvider>>,
         http_client_factory: HttpClientFactory,
         workspace_routing: WorkspaceRoutingContext,
+        request_contributors: Vec<Arc<dyn codex_extension_api::ModelRequestContributor>>,
     ) -> Self {
         let model_provider = create_model_provider(provider_info, auth_manager);
         let codex_api_key_env_enabled = model_provider
@@ -542,6 +547,7 @@ impl ModelClient {
             event_sender: None,
             http_client_factory,
             restored_history: false,
+            request_contributors,
         }
     }
 
@@ -1731,8 +1737,18 @@ impl ModelClientSession {
             let request_session_telemetry =
                 session_telemetry_for_request(session_telemetry, &request);
             options.extra_headers.extend(responses_headers);
+            let interceptors = crate::model_request::prepare(
+                &self.client.request_contributors,
+                &self.client.state.thread_id.to_string(),
+                &model_info.slug,
+                codex_extension_api::ModelRequestKind::Generation,
+                &mut request.client_metadata,
+            );
             let inference_trace_attempt = inference_trace.start_attempt();
             inference_trace_attempt.add_request_headers(&mut options.extra_headers);
+            if let Some(input) = tool_metadata::bounded_input(&request, &request.input) {
+                request.input = input;
+            }
             inference_trace_attempt.record_started(&request);
             let client = ApiResponsesClient::new(
                 transport,
@@ -1749,6 +1765,7 @@ impl ModelClientSession {
                         request_session_telemetry,
                         inference_trace_attempt,
                         Arc::clone(&self.client.state.provider),
+                        interceptors,
                     );
                     return Ok(stream);
                 }
@@ -1998,8 +2015,25 @@ impl ModelClientSession {
                 client_setup.auth.as_ref(),
                 &responses_headers,
             );
+            let interceptors = crate::model_request::prepare(
+                &self.client.request_contributors,
+                &self.client.state.thread_id.to_string(),
+                &model_info.slug,
+                if warmup {
+                    codex_extension_api::ModelRequestKind::Warmup
+                } else {
+                    codex_extension_api::ModelRequestKind::Generation
+                },
+                &mut ws_payload.client_metadata,
+            );
             let mut ws_request = ResponsesWsRequest::ResponseCreate(ws_payload);
             stamp_ws_stream_request_start_ms(&mut ws_request);
+            let ResponsesWsRequest::ResponseCreate(payload) = &ws_request;
+            let bounded_input = tool_metadata::bounded_input(&ws_request, payload.input);
+            if let Some(input) = bounded_input.as_deref() {
+                let ResponsesWsRequest::ResponseCreate(payload) = &mut ws_request;
+                payload.input = input;
+            }
             if !previous_response_id_from_untraced_warmup {
                 inference_trace_attempt.record_started(&ws_request);
             }
@@ -2048,6 +2082,7 @@ impl ModelClientSession {
                 request_session_telemetry,
                 inference_trace_attempt,
                 Arc::clone(&self.client.state.provider),
+                interceptors,
             );
             self.websocket_session.last_response_rx = Some(last_request_rx);
             return Ok(WebsocketStreamOutcome::Stream(stream));
@@ -2089,6 +2124,18 @@ impl ModelClientSession {
         websocket_telemetry
     }
 
+    /// Whether a previous request prepared a connection that is not known to be closed.
+    /// The next request still validates provider, auth, and headers before reuse.
+    pub(crate) async fn is_websocket_prewarmed(&self) -> bool {
+        if self.websocket_session.last_request.is_some()
+            && let Some(connection) = self.websocket_session.connection.as_ref()
+        {
+            !connection.is_closed().await
+        } else {
+            false
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn prewarm_websocket(
         &mut self,
@@ -2103,7 +2150,7 @@ impl ModelClientSession {
         if !self.client.responses_websocket_enabled() {
             return Ok(());
         }
-        if self.websocket_session.last_request.is_some() {
+        if self.is_websocket_prewarmed().await {
             return Ok(());
         }
 
@@ -2287,6 +2334,7 @@ fn map_response_stream(
     session_telemetry: SessionTelemetry,
     inference_trace_attempt: InferenceTraceAttempt,
     provider: SharedModelProvider,
+    interceptors: Vec<Box<dyn codex_extension_api::ModelResponseInterceptor>>,
 ) -> (ResponseStream, oneshot::Receiver<LastResponse>) {
     let codex_api::ResponseStream {
         rx_event,
@@ -2298,7 +2346,7 @@ fn map_response_stream(
     };
     map_response_events(
         upstream_request_id,
-        api_stream,
+        crate::model_request::intercept_stream(Box::pin(api_stream), interceptors),
         session_telemetry,
         inference_trace_attempt,
         provider,
