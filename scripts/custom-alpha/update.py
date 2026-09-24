@@ -9,8 +9,6 @@ import json
 import os
 import re
 import shutil
-import socket
-import struct
 import subprocess
 import sys
 import tarfile
@@ -80,7 +78,8 @@ def resolve_version_conflict(path, version):
 
 def _run(args, cwd=None, env=None, check=True):
     p = subprocess.run(args, cwd=cwd, env=env, text=True, stdout=subprocess.PIPE,
-                       stderr=subprocess.STDOUT, errors="replace")
+                       stderr=subprocess.STDOUT, errors="replace",
+                       creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
     if check and p.returncode:
         raise UpdateError("command", f"{Path(str(args[0])).name} failed ({p.returncode}): {p.stdout[-800:]}")
     return p
@@ -94,6 +93,27 @@ def _hash(path):
     return h.hexdigest()
 
 
+def _windows_path_key(path):
+    value = str(path).strip().strip('"').replace("/", "\\")
+    if value.startswith("\\\\?\\"):
+        value = value[4:]
+    try:
+        value = str(Path(value).resolve())
+    except OSError:
+        pass
+    return os.path.normcase(os.path.normpath(value))
+
+
+def _managed_daemon_home(process, daemon_paths):
+    command = str(process.get("CommandLine") or "")
+    if not re.search(r"(?<![\w-])app-server(?![\w-])", command, re.IGNORECASE):
+        return None
+    if not re.search(r"(?:^|\s)--managed-daemon(?:\s|$)", command, re.IGNORECASE):
+        return None
+    image = process.get("ExecutablePath")
+    return daemon_paths.get(_windows_path_key(image)) if image else None
+
+
 def _https(url, limit):
     req = urllib.request.Request(url, headers={"User-Agent": "codex-custom-alpha-updater/1"})
     with urllib.request.urlopen(req, timeout=40) as response:
@@ -105,120 +125,18 @@ def _https(url, limit):
 
 def _verify_idle(home):
     """Fail closed unless local-control proves every thread is not loaded."""
-    path = str(Path(home) / "app-server-daemon" / "app-server-control.sock")
+    path = str(Path(home) / "app-server-control" / "app-server-control.sock")
     if len(path) >= 108:
         return False
     try:
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        sock.settimeout(5)
-        sock.connect(path)
-        key = base64.b64encode(os.urandom(16)).decode("ascii")
-        sock.sendall((f"GET / HTTP/1.1\r\nHost: codex.local\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n").encode())
-        header = bytearray()
-        while b"\r\n\r\n" not in header and len(header) < 16384:
-            header.extend(sock.recv(1024))
-        accept = base64.b64encode(hashlib.sha1((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()).digest()).decode()
-        response_headers = {}
-        for line in header.decode("latin1").split("\r\n")[1:]:
-            if ":" in line:
-                name, value = line.split(":", 1)
-                response_headers[name.strip().lower()] = value.strip()
-        if b" 101 " not in header or response_headers.get("sec-websocket-accept") != accept:
-            return False
-        next_id = 0
-
-        def send_frame(raw, opcode=1):
-            mask = os.urandom(4)
-            n = len(raw)
-            prefix = bytes([0x80 | opcode, 0x80 | (n if n < 126 else 126 if n < 65536 else 127)])
-            if 126 <= n < 65536:
-                prefix += struct.pack("!H", n)
-            elif n >= 65536:
-                prefix += struct.pack("!Q", n)
-            sock.sendall(prefix + mask + bytes(b ^ mask[i % 4] for i, b in enumerate(raw)))
-
-        def send(message):
-            send_frame(json.dumps(message, separators=(",", ":")).encode())
-
-        def read_exact(size):
-            result = bytearray()
-            while len(result) < size:
-                chunk = sock.recv(size - len(result))
-                if not chunk:
-                    raise ValueError("websocket closed")
-                result.extend(chunk)
-            return bytes(result)
-
-        def receive():
-            data = bytearray()
-            while True:
-                first, second = read_exact(2)
-                op, size = first & 15, second & 127
-                if size == 126:
-                    size = struct.unpack("!H", read_exact(2))[0]
-                elif size == 127:
-                    size = struct.unpack("!Q", read_exact(8))[0]
-                if size > 2 * 1024 * 1024:
-                    raise ValueError("oversize websocket message")
-                mask = read_exact(4) if second & 128 else b""
-                chunk = bytearray(read_exact(size))
-                if mask:
-                    chunk = bytearray(b ^ mask[i % 4] for i, b in enumerate(chunk))
-                if op == 9:
-                    send_frame(chunk, 10)
-                    continue
-                if op == 8:
-                    raise ValueError("websocket closed")
-                data.extend(chunk)
-                if len(data) > 2 * 1024 * 1024:
-                    raise ValueError("oversize websocket message")
-                if first & 128:
-                    return json.loads(data)
-
-        def rpc(method, params):
-            nonlocal next_id
-            next_id += 1
-            send({"jsonrpc": "2.0", "id": next_id, "method": method, "params": params})
-            while True:
-                msg = receive()
-                if str(msg.get("id")) == str(next_id):
-                    if "error" in msg:
-                        raise ValueError("local-control RPC error")
-                    return msg["result"]
-
-        rpc("initialize", {"clientInfo": {"name": "custom-alpha-updater", "title": "Custom alpha updater", "version": "1"},
-                            "capabilities": {"experimentalApi": True, "requestAttestation": False,
-                                             "mcpServerOpenaiFormElicitation": False, "extensions": {}}})
-        send({"jsonrpc": "2.0", "method": "initialized", "params": {}})
-        cursor, seen = None, set()
-        for _ in range(100):
-            params = {"limit": 100}
-            if cursor:
-                params["cursor"] = cursor
-            result = rpc("thread/list", params)
-            data = result.get("data")
-            if not isinstance(data, list):
-                return False
-            for thread in data:
-                status = thread.get("status") if isinstance(thread, dict) else None
-                if isinstance(status, dict):
-                    status = status.get("type")
-                if status not in ("notLoaded", "not_loaded"):
-                    return False
-            cursor = result.get("nextCursor")
-            if not cursor:
-                return True
-            if cursor in seen:
-                return False
-            seen.add(cursor)
-        return False
+        p = subprocess.run(["pwsh.exe", "-NoProfile", "-NonInteractive", "-File",
+                            str(Path(__file__).with_name("idle_gate.ps1")), "-SocketPath", path],
+                           text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                           timeout=35, errors="replace",
+                           creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+        return p.returncode == 0 and p.stdout.strip() == "IDLE"
     except Exception:
         return False
-    finally:
-        try:
-            sock.close()
-        except Exception:
-            pass
 
 
 class Ops:
@@ -235,7 +153,8 @@ class Ops:
         if self.wt.exists():
             if not marker.exists() or json.loads(marker.read_text()) != owner:
                 raise UpdateError("worktree", "scratch path exists but is not this updater's worktree")
-            if _run(["git", "rev-parse", "--show-toplevel"], cwd=self.wt).stdout.strip() != str(self.wt):
+            top = Path(_run(["git", "rev-parse", "--show-toplevel"], cwd=self.wt).stdout.strip()).resolve()
+            if top != self.wt:
                 raise UpdateError("worktree", "scratch path is not a git worktree")
             if _run(["git", "status", "--porcelain"], cwd=self.wt).stdout.strip():
                 raise UpdateError("worktree", "updater worktree has local changes; preserving them")
@@ -290,13 +209,28 @@ class Ops:
         info = _run([str(exe), "--version"], cwd=rs, env=env)
         if version not in info.stdout:
             raise UpdateError("build", "built codex.exe version does not match npm alpha")
+        self._commit_generated_lock(wt)
         return exe
 
+    @staticmethod
+    def _commit_generated_lock(worktree):
+        lines = _run(["git", "status", "--porcelain", "--untracked-files=all"], cwd=worktree).stdout.splitlines()
+        if not lines:
+            return
+        if any(line[3:] != "codex-rs/Cargo.lock" or "?" in line[:2] or "D" in line[:2] for line in lines):
+            raise UpdateError("build", "successful build left changes beyond its generated Cargo.lock")
+        _run(["git", "add", "--", "codex-rs/Cargo.lock"], cwd=worktree)
+        _run(["git", "-c", "user.name=Custom Alpha Updater", "-c", "user.email=updater@localhost",
+              "commit", "-m", "chore: preserve updater Cargo.lock"], cwd=worktree)
+
     def _template(self, version):
-        meta = json.loads(_https("https://registry.npmjs.org/%40openai%2Fcodex-win32-x64", 32 * 1024 * 1024))
-        pkg = meta.get("versions", {}).get(version)
+        meta = json.loads(_https("https://registry.npmjs.org/%40openai%2Fcodex", 32 * 1024 * 1024))
+        platform_version = version + "-win32-x64"
+        pkg = meta.get("versions", {}).get(platform_version)
         if not pkg:
             raise UpdateError("package", "platform package does not have the selected alpha version")
+        if pkg.get("name") != "@openai/codex" or pkg.get("version") != platform_version:
+            raise UpdateError("package", "npm platform package identity does not match selected alpha")
         dist = pkg.get("dist", {})
         integrity = dist.get("integrity", "")
         match = re.search(r"(?:^| )sha512-([A-Za-z0-9+/=]+)(?: |$)", integrity)
@@ -326,13 +260,16 @@ class Ops:
                         if expanded > MAX_EXPANDED:
                             raise UpdateError("package", "expanded npm package exceeds limit")
                         archive.extract(m, temp)
-                extracted = temp / "package"
-                if not (extracted / "codex-package.json").is_file() or not (extracted / "bin" / "codex.exe").is_file():
-                    raise UpdateError("package", "official package is missing codex-package.json or bin/codex.exe")
-                info = json.loads((extracted / "package.json").read_text(encoding="utf-8"))
-                if info.get("version") != version:
+                package = temp / "package"
+                info = json.loads((package / "package.json").read_text(encoding="utf-8"))
+                if info.get("name") != "@openai/codex" or info.get("version") != platform_version:
                     raise UpdateError("package", "official package version does not match selected alpha")
-                os.replace(extracted, target)
+                payload = package / "vendor" / "x86_64-pc-windows-msvc"
+                if not (payload / "codex-package.json").is_file() or not (payload / "bin" / "codex.exe").is_file():
+                    raise UpdateError("package", "official Windows payload is missing codex-package.json or bin/codex.exe")
+                if not (payload / "codex-resources").exists() or not (payload / "codex-path").exists():
+                    raise UpdateError("package", "official Windows payload is missing resources or codex-path")
+                shutil.copytree(payload, target)
             finally:
                 shutil.rmtree(temp, ignore_errors=True)
         return target, integrity
@@ -394,7 +331,7 @@ class Ops:
 
     def safe(self):
         homes = [str(Path(p).resolve()) for p in self.c["codexHomes"]]
-        script = "Get-CimInstance Win32_Process -Filter \"name='codex.exe'\" | Select-Object ExecutablePath,CommandLine | ConvertTo-Json -Compress"
+        script = "$ErrorActionPreference='Stop'; Get-CimInstance Win32_Process -Filter \"name='codex.exe'\" | Select-Object ExecutablePath,CommandLine | ConvertTo-Json -Compress"
         p = _run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script], check=False)
         if p.returncode:
             return False
@@ -402,15 +339,38 @@ class Ops:
             processes = json.loads(p.stdout) if p.stdout.strip() else []
             if isinstance(processes, dict):
                 processes = [processes]
-            daemons = {str(Path(h) / "packages" / "app-server-daemon" / "current" / "bin" / "codex.exe").casefold() for h in homes}
+            daemons = {_windows_path_key(Path(h) / "packages" / "app-server-daemon" / "current" / "bin" / "codex.exe"): h for h in homes}
+            running = set()
             for proc in processes:
-                image = str(proc.get("ExecutablePath", "")).casefold()
-                if image in daemons:
+                home = _managed_daemon_home(proc, daemons)
+                if home:
+                    running.add(home)
                     continue
                 return False
         except Exception:
             return False
-        return all(_verify_idle(home) for home in homes)
+        # No managed daemon means no in-memory loaded threads; an existing daemon
+        # must prove idle through local-control or activation is deferred.
+        return all(_verify_idle(home) for home in running)
+
+    def already_current(self, version):
+        state = self.artifacts / "last-known-good.json"
+        if not state.is_file():
+            return False
+        try:
+            record = json.loads(state.read_text(encoding="utf-8"))
+            candidate = Path(record["path"]).resolve()
+            if record.get("version") != version or candidate.parent != (self.artifacts / "candidates").resolve():
+                return False
+            manifest = json.loads((candidate / "candidate.json").read_text(encoding="utf-8"))
+            expected = manifest["codexSha256"]
+            if record.get("codexSha256") != expected:
+                return False
+            return all((Path(home) / "packages" / "app-server-daemon" / "current" / "bin" / "codex.exe").is_file()
+                       and _hash(Path(home) / "packages" / "app-server-daemon" / "current" / "bin" / "codex.exe") == expected
+                       for home in self.c["codexHomes"])
+        except Exception:
+            return False
 
     def activate(self, candidate):
         exe = candidate / "bin" / "codex.exe"
@@ -421,7 +381,8 @@ class Ops:
             if p.returncode:
                 raise UpdateError("activate", f"official daemon update failed for {Path(home).name}: {p.stdout[-500:]}")
         manifest = json.loads((candidate / "candidate.json").read_text(encoding="utf-8"))
-        self._atomic(self.artifacts / "last-known-good.json", {"version": manifest["version"], "path": str(candidate)})
+        self._atomic(self.artifacts / "last-known-good.json", {"version": manifest["version"], "path": str(candidate),
+                                                                  "codexSha256": manifest["codexSha256"]})
         (self.artifacts / "prepared.json").unlink(missing_ok=True)
 
 
@@ -442,7 +403,11 @@ def run_pipeline(ops, artifacts):
     try:
         candidate = ops.prepared()
         if candidate is None:
-            candidate = ops.build_candidate(ops.latest())
+            version = ops.latest()
+            if ops.already_current(version):
+                write_status(artifacts, "current", "complete", f"Codex alpha {version} is already installed")
+                return 0
+            candidate = ops.build_candidate(version)
         if not ops.safe():
             write_status(artifacts, "deferred", "idle-gate", "running client, loaded thread, or idle state unknown")
             return 0

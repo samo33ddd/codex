@@ -2,7 +2,11 @@
 """Focused offline checks for the custom alpha updater."""
 
 import json
+import base64
+import hashlib
+import io
 import sys
+import tarfile
 import tempfile
 from pathlib import Path
 
@@ -11,8 +15,8 @@ import update
 
 
 class FakeOps:
-    def __init__(self, root, idle=True, failure=None):
-        self.events, self.idle, self.failure = [], idle, failure
+    def __init__(self, root, idle=True, current=False, failure=None):
+        self.events, self.idle, self.current, self.failure = [], idle, current, failure
         self.root = Path(root)
 
     def prepared(self):
@@ -22,6 +26,10 @@ class FakeOps:
     def latest(self):
         self.events.append("latest")
         return "1.2.3-alpha.4"
+
+    def already_current(self, version):
+        self.events.append("current")
+        return self.current
 
     def build_candidate(self, version):
         self.events.append("stage")
@@ -70,12 +78,61 @@ def main():
 
         ops = FakeOps(folder, idle=False)
         assert update.run_pipeline(ops, Path(folder) / "deferred") == 0
-        assert ops.events == ["prepared", "latest", "stage", "idle"]
+        assert ops.events == ["prepared", "latest", "current", "stage", "idle"]
 
         ops = FakeOps(folder)
         assert update.run_pipeline(ops, Path(folder) / "success") == 0
-        assert ops.events == ["prepared", "latest", "stage", "idle", "activate"]
+        assert ops.events == ["prepared", "latest", "current", "stage", "idle", "activate"]
         assert json.loads((Path(folder) / "success" / "status.json").read_text())["state"] == "activated"
+
+        ops = FakeOps(folder, current=True)
+        assert update.run_pipeline(ops, Path(folder) / "current") == 0
+        assert ops.events == ["prepared", "latest", "current"]
+        assert json.loads((Path(folder) / "current" / "status.json").read_text())["state"] == "current"
+
+        version = "0.158.0-alpha.8"
+        platform_version = version + "-win32-x64"
+        packed = io.BytesIO()
+        with tarfile.open(fileobj=packed, mode="w:gz") as archive:
+            files = {
+                "package/package.json": json.dumps({"name": "@openai/codex", "version": platform_version}).encode(),
+                "package/vendor/x86_64-pc-windows-msvc/codex-package.json": b"{}",
+                "package/vendor/x86_64-pc-windows-msvc/bin/codex.exe": b"official exe",
+                "package/vendor/x86_64-pc-windows-msvc/codex-resources/resource": b"resource",
+                "package/vendor/x86_64-pc-windows-msvc/codex-path": b"helper",
+            }
+            for name, data in files.items():
+                info = tarfile.TarInfo(name)
+                info.size = len(data)
+                archive.addfile(info, io.BytesIO(data))
+        blob = packed.getvalue()
+        integrity = "sha512-" + base64.b64encode(hashlib.sha512(blob).digest()).decode()
+        metadata = {"versions": {platform_version: {"name": "@openai/codex", "version": platform_version,
+                     "dist": {"tarball": "https://registry.test/package.tgz", "integrity": integrity}}}}
+        original_https = update._https
+        update._https = lambda url, limit: json.dumps(metadata).encode() if "registry.npmjs.org" in url else blob
+        try:
+            ops = update.Ops({"sourceRepository": folder, "scratchWorktreeRoot": str(Path(folder) / "worktree"),
+                              "artifactsRoot": str(Path(folder) / "artifacts"),
+                              "officialPackageTemplatePath": str(Path(folder) / "templates")})
+            template, _ = ops._template(version)
+            assert (template / "bin" / "codex.exe").read_bytes() == b"official exe"
+            assert (template / "codex-resources" / "resource").read_bytes() == b"resource"
+            assert not (template / "package.json").exists()
+        finally:
+            update._https = original_https
+
+        home = Path(folder) / "codex-home"
+        release_exe = home / "packages" / "app-server-daemon" / "releases" / "local-HASH-x86_64-pc-windows-msvc" / "bin" / "codex.exe"
+        release_exe.parent.mkdir(parents=True)
+        release_exe.write_bytes(b"managed daemon")
+        daemon_paths = {update._windows_path_key(release_exe): str(home)}
+        extended = "\\\\?\\" + str(release_exe)
+        fixture = {"ExecutablePath": extended,
+                   "CommandLine": f'"{extended}" app-server --listen unix:// --managed-daemon'}
+        assert update._managed_daemon_home(fixture, daemon_paths) == str(home)
+        assert update._managed_daemon_home({**fixture, "CommandLine": f'"{extended}" app-server --listen unix://'}, daemon_paths) is None
+        assert update._managed_daemon_home({**fixture, "ExecutablePath": str(Path(folder) / "codex.exe")}, daemon_paths) is None
 
     print("custom-alpha updater checks passed")
 
