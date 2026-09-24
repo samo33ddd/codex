@@ -81,6 +81,10 @@ use tokio::sync::oneshot;
 use tracing::error;
 use ts_rs::TS;
 
+#[path = "protocol/hook_owner.rs"]
+mod hook_owner;
+pub use hook_owner::HookOwner;
+
 pub use crate::approvals::ApplyPatchApprovalRequestEvent;
 pub use crate::approvals::ElicitationAction;
 pub use crate::approvals::ExecApprovalRequestEvent;

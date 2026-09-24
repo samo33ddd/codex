@@ -760,6 +760,7 @@ impl Session {
         extensions: Arc<codex_extension_api::ExtensionRegistry<crate::config::Config>>,
         mut thread_extension_init: ExtensionDataInit,
         client_mcp_extensions: ClientMcpExtensions,
+        hook_owner_handle: codex_hooks::HookOwnerHandle,
         agent_control: AgentControlInit,
         reserved_thread_id: Option<ThreadId>,
         environment_manager: Arc<EnvironmentManager>,
@@ -1575,13 +1576,14 @@ impl Session {
                 &session_configuration.disabled_plugin_ids,
             )
             .await;
-            let (hooks, async_hook_results) = Hooks::new(
+            let (hooks, async_hook_results) = Hooks::new_with_owner_handle(
                 hooks_config,
                 thread_id,
                 Arc::new(CoreHookMcpExecutor {
                     runtime: Arc::clone(&mcp_runtime),
                     thread_id,
                 }),
+                hook_owner_handle,
             )?;
             for warning in hooks.startup_warnings() {
                 post_session_configured_events.push(Event {

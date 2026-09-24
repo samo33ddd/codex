@@ -23,6 +23,13 @@ fn spawn_startup_thread_start(
     let request_handle = app_server.request_handle();
     let thread_params_mode = app_server.thread_params_mode();
     let remote_cwd_override = app_server.remote_cwd_override().map(Path::to_path_buf);
+    let hook_owner = match app_server.hook_owner_for_request() {
+        Ok(hook_owner) => hook_owner,
+        Err(error) => {
+            app_event_tx.send(AppEvent::StartupThreadStarted { result: Err(error) });
+            return;
+        }
+    };
     let thread_tool_transport = app_server.thread_tool_transport();
     tokio::spawn(async move {
         let result = crate::app_server_session::start_thread_with_request_handle(
@@ -31,6 +38,7 @@ fn spawn_startup_thread_start(
             config,
             thread_params_mode,
             remote_cwd_override,
+            hook_owner,
             thread_tool_transport,
         )
         .await

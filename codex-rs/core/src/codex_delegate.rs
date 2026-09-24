@@ -107,6 +107,7 @@ pub(crate) async fn run_codex_thread_interactive(
         fork_persistence: ForkPersistence::Copied,
         session_source,
         forked_from_thread_id,
+        hook_owner_handle: parent_session.hook_owner_handle(),
         parent_thread_id: Some(parent_session.thread_id),
         thread_source: Some(if is_guardian_reviewer {
             ThreadSource::GuardianReview

@@ -155,6 +155,14 @@ struct RemoteServerMetadata {
     codex_home: Option<String>,
     platform_family: Option<String>,
     platform_os: Option<String>,
+    supports_hook_owner: bool,
+}
+
+fn supports_hook_owner_from_initialize_result(result: &serde_json::Value) -> bool {
+    result
+        .get("supportsHookOwner")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
 }
 
 pub struct RemoteAppServerClient {
@@ -233,6 +241,10 @@ impl RemoteAppServerClient {
 
     pub fn platform_os(&self) -> Option<&str> {
         self.metadata.platform_os.as_deref()
+    }
+
+    pub fn supports_hook_owner(&self) -> bool {
+        self.metadata.supports_hook_owner
     }
 
     async fn connect_with_stream<S>(
@@ -895,6 +907,8 @@ where
                                 .and_then(serde_json::Value::as_str).map(str::to_string);
                             metadata.platform_os = response.result.get("platformOs")
                                 .and_then(serde_json::Value::as_str).map(str::to_string);
+                            metadata.supports_hook_owner =
+                                supports_hook_owner_from_initialize_result(&response.result);
                             break Ok(());
                         }
                         JSONRPCMessage::Error(error) if error.id == initialize_request_id => {
@@ -1065,6 +1079,23 @@ fn websocket_close_error_is_already_closed(err: &TungsteniteError) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn older_remote_server_initialize_responses_default_hook_owner_support_to_false() {
+        assert!(!supports_hook_owner_from_initialize_result(
+            &serde_json::json!({})
+        ));
+    }
+
+    #[test]
+    fn remote_server_hook_owner_support_uses_the_advertised_boolean() {
+        assert!(supports_hook_owner_from_initialize_result(
+            &serde_json::json!({ "supportsHookOwner": true })
+        ));
+        assert!(!supports_hook_owner_from_initialize_result(
+            &serde_json::json!({ "supportsHookOwner": "true" })
+        ));
+    }
 
     #[tokio::test]
     async fn shutdown_tolerates_worker_exit_after_command_is_queued() {

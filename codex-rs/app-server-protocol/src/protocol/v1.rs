@@ -81,6 +81,9 @@ pub struct InitializeResponse {
     /// Operating system for the running app-server target, for example
     /// `"macos"`, `"linux"`, or `"windows"`.
     pub platform_os: String,
+    /// True only when this process accepts transient hook ownership on its local daemon socket.
+    #[serde(default)]
+    pub supports_hook_owner: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]

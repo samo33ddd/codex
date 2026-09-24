@@ -1,0 +1,54 @@
+{
+  "sourceCommit": "c5d9b253ab7481ec3e9add8a272bd9ac24873304",
+  "binarySha256": "9CDA3D4428D2D8EF6D8DE9D388EDB7B8136E40C06C2377BD14C48A9A353DC0D9",
+  "version": "0.158.0-alpha.5",
+  "isolatedStatus": "PASS",
+  "checks": {
+    "twoRoots": true,
+    "missingOptionalFieldsRemainAbsent": true,
+    "launchTokensMatchedWithoutLogging": true,
+    "hookAuthTokenAbsent": true,
+    "publicForkUsesCallerOwner": true,
+    "persistedSentinelsAbsent": true
+  },
+  "turnStartRpcCalls": 3,
+  "sessionOwners": [
+    {
+      "pane": "t003-pane-a",
+      "tab": "t003-tab-a",
+      "worktree": "t003-worktree-a",
+      "launchTokenMatched": true,
+      "hookAuthTokenAbsent": true
+    },
+    {
+      "pane": "t003-pane-b",
+      "tab": null,
+      "worktree": null,
+      "launchTokenMatched": true,
+      "hookAuthTokenAbsent": true
+    },
+    {
+      "pane": "t003-pane-b",
+      "tab": null,
+      "worktree": null,
+      "launchTokenMatched": true,
+      "hookAuthTokenAbsent": true
+    }
+  ],
+  "isolatedDaemonStopped": true,
+  "isolatedRootRemoved": true,
+  "internalChildRuntimeExercised": false,
+  "managedDaemonBootstrap": "PASS",
+  "installedBinaryShaMatches": true,
+  "managedClientCodeModeMarker": "T003_MANAGED_CLIENT_PASS",
+  "consoleWatchSeconds": 120,
+  "newVisibleConsoleWindows": 0,
+  "orcaRestarted": true,
+  "orcaManagedClientDefault": true,
+  "orcaNoDaemonArgumentRemoved": true,
+  "limitations": [
+    "Internal children covered by core test, not isolated runtime probe",
+    "Visible-window watcher does not detect tabs added to an existing terminal window",
+    "Existing unrelated lifecycle-hook exit warning is unchanged"
+  ]
+}

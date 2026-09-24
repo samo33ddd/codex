@@ -711,6 +711,13 @@ impl AppServerClient {
         }
     }
 
+    pub fn supports_hook_owner(&self) -> bool {
+        match self {
+            Self::InProcess(_) => false,
+            Self::Remote(client) => client.supports_hook_owner(),
+        }
+    }
+
     pub fn codex_home(&self, local_codex_home: &AbsolutePathBuf) -> Option<AppServerPath> {
         match self {
             Self::InProcess(_) => Some(AppServerPath::from_app_server(

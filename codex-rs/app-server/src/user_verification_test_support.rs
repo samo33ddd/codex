@@ -154,6 +154,7 @@ impl Harness {
             AnalyticsEventsClient::disabled(),
         ));
         let processor = Arc::new(MessageProcessor::new(MessageProcessorArgs {
+            supports_hook_owner: false,
             outgoing: Arc::clone(&outgoing),
             analytics_events_client: AnalyticsEventsClient::disabled(),
             arg0_paths: Arg0DispatchPaths::default(),
@@ -174,11 +175,29 @@ impl Harness {
                 ConnectionOrigin::Stdio | ConnectionOrigin::RemoteControl => {
                     AppServerRpcTransport::Stdio
                 }
-                ConnectionOrigin::WebSocket => AppServerRpcTransport::Websocket,
+                ConnectionOrigin::LocalDaemonSocket | ConnectionOrigin::WebSocket => {
+                    AppServerRpcTransport::Websocket
+                }
             },
             remote_control_handle: None,
             plugin_startup_tasks: None,
         }));
+        let transport = match origin {
+            ConnectionOrigin::LocalDaemonSocket => AppServerTransport::UnixSocket {
+                socket_path:
+                    codex_utils_absolute_path::AbsolutePathBuf::from_absolute_path_checked(
+                        home.path().join("daemon.sock"),
+                    )?,
+            },
+            ConnectionOrigin::WebSocket => AppServerTransport::WebSocket {
+                bind_address: "127.0.0.1:0".parse()?,
+            },
+            // Remote control can share a process whose primary listener is stdio.
+            // Keeping that case tests that authorization uses the connection's origin.
+            ConnectionOrigin::Stdio
+            | ConnectionOrigin::InProcess
+            | ConnectionOrigin::RemoteControl => AppServerTransport::Stdio,
+        };
         Ok(Self {
             processor,
             session: Arc::new(ConnectionSessionState::new(origin)),
@@ -188,16 +207,7 @@ impl Harness {
             outgoing,
             messages,
             home,
-            transport: match origin {
-                ConnectionOrigin::WebSocket => AppServerTransport::WebSocket {
-                    bind_address: "127.0.0.1:0".parse()?,
-                },
-                // Remote control can share a process whose primary listener is stdio.
-                // Keeping that case tests that authorization uses the connection's origin.
-                ConnectionOrigin::Stdio
-                | ConnectionOrigin::InProcess
-                | ConnectionOrigin::RemoteControl => AppServerTransport::Stdio,
-            },
+            transport,
         })
     }
 

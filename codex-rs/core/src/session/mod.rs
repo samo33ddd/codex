@@ -78,6 +78,7 @@ use codex_features::FEATURES;
 use codex_features::Feature;
 use codex_features::unstable_features_warning_event;
 use codex_history::RolloutItem;
+use codex_hooks::HookOwnerHandle;
 use codex_hooks::Hooks;
 use codex_hooks::HooksConfig;
 use codex_login::AuthManager;
@@ -467,6 +468,7 @@ pub(crate) struct SessionSpawnArgs {
     pub(crate) environment_selections: Vec<TurnEnvironmentSelection>,
     pub(crate) thread_extension_init: ExtensionDataInit,
     pub(crate) client_mcp_extensions: ClientMcpExtensions,
+    pub(crate) hook_owner_handle: HookOwnerHandle,
     pub(crate) reserved_thread_id: Option<ThreadId>,
     pub(crate) analytics_events_client: Option<AnalyticsEventsClient>,
     pub(crate) image_store: Arc<dyn AttachmentStore>,
@@ -570,6 +572,7 @@ impl Session {
             environment_selections,
             thread_extension_init,
             client_mcp_extensions,
+            hook_owner_handle,
             reserved_thread_id,
             analytics_events_client,
             image_store,
@@ -889,6 +892,7 @@ impl Session {
             extensions,
             thread_extension_init,
             client_mcp_extensions,
+            hook_owner_handle,
             agent_control,
             reserved_thread_id,
             environment_manager,
@@ -4991,6 +4995,10 @@ impl Session {
 
     pub(crate) fn hooks(&self) -> Arc<Hooks> {
         self.services.hooks.load_full()
+    }
+
+    pub(crate) fn hook_owner_handle(&self) -> HookOwnerHandle {
+        self.services.hooks.load().hook_owner_handle()
     }
 
     pub(crate) fn user_shell(&self) -> Arc<shell::Shell> {

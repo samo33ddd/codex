@@ -816,6 +816,7 @@ fn spawn_approved_task_tool_call(
         app_server.thread_params_mode(),
         app_server.remote_cwd_override(),
         /*session_start_source*/ None,
+        /*hook_owner*/ None,
     );
     app_server
         .thread_tool_transport()
@@ -855,6 +856,7 @@ async fn external_transport_registers_dynamic_tools_and_finds_task_mentions() ->
         app.config.clone(),
         crate::app_server_session::ThreadParamsMode::Embedded,
         /*remote_cwd_override*/ None,
+        /*hook_owner*/ None,
         app_server.thread_tool_transport(),
     )
     .await?;
@@ -1112,6 +1114,7 @@ async fn local_daemon_registers_approval_gated_mcp_tools_for_both_start_paths() 
         app.config.clone(),
         crate::app_server_session::ThreadParamsMode::Embedded,
         /*remote_cwd_override*/ None,
+        /*hook_owner*/ None,
         app_server.thread_tool_transport(),
     )
     .await?;
@@ -1492,6 +1495,7 @@ async fn older_external_server_starts_without_unsupported_dynamic_tools_or_histo
         app.config.clone(),
         crate::app_server_session::ThreadParamsMode::Embedded,
         /*remote_cwd_override*/ None,
+        /*hook_owner*/ None,
         app_server.thread_tool_transport(),
     )
     .await?;

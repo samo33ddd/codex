@@ -114,6 +114,7 @@ impl PreparedGuardianContext {
                     thread: self.key.thread_instructions.clone(),
                     ..Default::default()
                 }),
+                hook_owner_handle: self.parent.hook_owner_handle(),
             }),
             initial_history: initial_history.unwrap_or(InitialHistory::New),
             environments: Some(self.context.environments().to_selections()),

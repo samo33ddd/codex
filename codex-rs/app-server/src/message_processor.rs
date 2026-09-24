@@ -138,6 +138,7 @@ fn reject_removed_permission_profile(request: &JSONRPCRequest) -> Result<(), JSO
 }
 
 pub(crate) struct MessageProcessor {
+    supports_hook_owner: bool,
     pub(crate) turn_admission: TurnAdmission,
     user_verification: Arc<crate::user_verification::Service>,
     outgoing: Arc<OutgoingMessageSender>,
@@ -245,6 +246,7 @@ impl ConnectionSessionState {
 }
 
 pub(crate) struct MessageProcessorArgs {
+    pub(crate) supports_hook_owner: bool,
     pub(crate) outgoing: Arc<OutgoingMessageSender>,
     pub(crate) analytics_events_client: AnalyticsEventsClient,
     pub(crate) arg0_paths: Arg0DispatchPaths,
@@ -271,6 +273,7 @@ impl MessageProcessor {
     /// `Sender` so handlers can enqueue messages to be written to stdout.
     pub(crate) fn new(args: MessageProcessorArgs) -> Self {
         let MessageProcessorArgs {
+            supports_hook_owner,
             outgoing,
             analytics_events_client,
             arg0_paths,
@@ -460,6 +463,7 @@ impl MessageProcessor {
             Arc::clone(&config),
             config_warnings.clone(),
             rpc_transport,
+            supports_hook_owner,
             Arc::clone(&user_verification),
         );
         let marketplace_processor = MarketplaceRequestProcessor::new(
@@ -582,6 +586,7 @@ impl MessageProcessor {
         );
 
         Self {
+            supports_hook_owner,
             turn_admission,
             user_verification,
             outgoing,
@@ -1075,6 +1080,23 @@ impl MessageProcessor {
             connection_id,
             request_id: codex_request.id().clone(),
         };
+        let hook_owner = match &codex_request {
+            ClientRequest::ThreadStart { params, .. } => params.hook_owner.as_ref(),
+            ClientRequest::ThreadResume { params, .. } => params.hook_owner.as_ref(),
+            ClientRequest::ThreadFork { params, .. } => params.hook_owner.as_ref(),
+            _ => None,
+        };
+        if let Some(_hook_owner) = hook_owner
+            && (!self.supports_hook_owner
+                || session.origin != crate::transport::ConnectionOrigin::LocalDaemonSocket)
+        {
+            return Err(invalid_request(
+                "hookOwner is only accepted from the authenticated local daemon socket",
+            ));
+        }
+        if let Some(hook_owner) = hook_owner {
+            hook_owner.validate().map_err(invalid_params)?;
+        }
         let result: Result<Option<ClientResponsePayload>, JSONRPCErrorError> = match codex_request {
             ClientRequest::Initialize { .. } => {
                 panic!("Initialize should be handled before initialized request dispatch");

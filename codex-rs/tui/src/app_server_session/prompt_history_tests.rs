@@ -63,6 +63,7 @@ async fn lifecycle_metadata_uses_local_prompt_history() -> Result<()> {
             config.clone(),
             mode,
             /*remote_cwd_override*/ None,
+            /*hook_owner*/ None,
             app_server.thread_tool_transport(),
         )
         .await?;

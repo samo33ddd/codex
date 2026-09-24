@@ -80,6 +80,8 @@ pub use legacy_notify::legacy_notify_json;
 pub use mcp::HookMcpCall;
 pub use mcp::HookMcpExecutor;
 pub use registry::HookListOutcome;
+pub use registry::HookOwnerChangePolicy;
+pub use registry::HookOwnerHandle;
 pub use registry::Hooks;
 pub use registry::HooksConfig;
 pub use registry::list_hooks;

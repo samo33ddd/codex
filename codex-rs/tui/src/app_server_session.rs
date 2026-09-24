@@ -6,6 +6,7 @@
 mod external_agent_config;
 mod fs;
 mod history;
+mod hook_owner;
 mod models;
 mod realtime;
 mod rollout_history;
@@ -140,6 +141,7 @@ use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::openai_models::ModelServiceTier;
 use codex_protocol::openai_models::ModelUpgrade;
 use codex_protocol::openai_models::ReasoningEffortPreset;
+use codex_protocol::protocol::HookOwner;
 use codex_protocol::protocol::SubAgentSource;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::PathUri;
@@ -311,6 +313,7 @@ pub(crate) struct AppServerBootstrap {
 
 pub(crate) struct AppServerSession {
     client: AppServerClient,
+    hook_owner: std::result::Result<Option<HookOwner>, &'static str>,
     next_request_id: i64,
     history_pagination: HashMap<ThreadId, history::ThreadHistoryPagination>,
     task_tool_threads: HashSet<ThreadId>,
@@ -419,8 +422,10 @@ impl AppServerSession {
     }
 
     pub(crate) fn new(client: AppServerClient, thread_params_mode: ThreadParamsMode) -> Self {
+        let hook_owner = hook_owner::capture(&client, thread_params_mode);
         Self {
             client,
+            hook_owner,
             next_request_id: 1,
             history_pagination: HashMap::new(),
             task_tool_threads: HashSet::new(),
@@ -436,6 +441,12 @@ impl AppServerSession {
             external_agent_config_import_id: Mutex::default(),
             dynamic_tool_mcp: None,
         }
+    }
+
+    pub(crate) fn hook_owner_for_request(&self) -> Result<Option<HookOwner>> {
+        self.hook_owner
+            .clone()
+            .map_err(|error| color_eyre::eyre::eyre!("{error}"))
     }
 
     pub(crate) async fn start_dynamic_tool_mcp(
@@ -479,6 +490,7 @@ impl AppServerSession {
             self.thread_params_mode(),
             self.remote_cwd_override(),
             /*session_start_source*/ None,
+            /*hook_owner*/ None,
         );
         self.dynamic_tool_mcp = Some(Arc::new(
             DynamicToolMcpServer::start(
@@ -766,6 +778,7 @@ impl AppServerSession {
             self.thread_params_mode(),
             remote_cwd_override.or(self.remote_cwd_override.as_deref()),
             session_start_source,
+            self.hook_owner_for_request()?,
         );
         if let Some(selected_profile) = selected_profile {
             params.runtime_workspace_roots = None;
@@ -937,6 +950,7 @@ impl AppServerSession {
                 thread_id,
                 self.thread_params_mode(),
                 self.remote_cwd_override.as_deref(),
+                self.hook_owner_for_request()?,
             )
         };
         if config_source == ForkConfigSource::Session {
@@ -1674,6 +1688,7 @@ pub(crate) async fn start_thread_with_request_handle(
     config: Config,
     thread_params_mode: ThreadParamsMode,
     remote_cwd_override: Option<PathBuf>,
+    hook_owner: Option<HookOwner>,
     thread_tool_transport: ThreadToolTransport,
 ) -> Result<AppServerStartedThread> {
     let request_id = RequestId::String(format!("startup-thread-start-{}", Uuid::new_v4()));
@@ -1682,6 +1697,7 @@ pub(crate) async fn start_thread_with_request_handle(
         thread_params_mode,
         remote_cwd_override.as_deref(),
         /*session_start_source*/ None,
+        hook_owner,
     );
     thread_tool_transport.configure(&mut params);
     let (response, _history_support, task_tools_available) =
@@ -2019,7 +2035,11 @@ pub(crate) fn thread_start_params_from_config(
     thread_params_mode: ThreadParamsMode,
     remote_cwd_override: Option<&std::path::Path>,
     session_start_source: Option<ThreadStartSource>,
+    hook_owner: Option<HookOwner>,
 ) -> ThreadStartParams {
+    let hook_owner = (thread_params_mode != ThreadParamsMode::Remote)
+        .then_some(hook_owner)
+        .flatten();
     let permissions = permissions_selection_from_config(config, thread_params_mode);
     let sandbox = permissions
         .is_none()
@@ -2047,6 +2067,7 @@ pub(crate) fn thread_start_params_from_config(
         ephemeral: Some(config.ephemeral),
         history_mode: (!config.ephemeral).then_some(ThreadHistoryMode::Paginated),
         session_start_source,
+        hook_owner,
         thread_source: Some(ThreadSource::User),
         developer_instructions: with_terminal_visualization_instructions(
             config, /*control_instructions*/ None,
@@ -2061,10 +2082,15 @@ fn thread_resume_params_from_config(
     thread_params_mode: ThreadParamsMode,
     remote_cwd_override: Option<&std::path::Path>,
     model_settings: ResumeModelSettings,
+    hook_owner: Option<HookOwner>,
 ) -> ThreadResumeParams {
+    let hook_owner = (thread_params_mode != ThreadParamsMode::Remote)
+        .then_some(hook_owner)
+        .flatten();
     if model_settings == ResumeModelSettings::PreserveExistingThread {
         return ThreadResumeParams {
             thread_id: thread_id.to_string(),
+            hook_owner,
             ..ThreadResumeParams::default()
         };
     }
@@ -2108,6 +2134,7 @@ fn thread_resume_params_from_config(
         sandbox,
         permissions,
         config: config_overrides,
+        hook_owner,
         developer_instructions: with_terminal_visualization_instructions(
             &config, /*control_instructions*/ None,
         ),
@@ -2129,7 +2156,11 @@ fn thread_fork_params_from_config(
     thread_id: ThreadId,
     thread_params_mode: ThreadParamsMode,
     remote_cwd_override: Option<&std::path::Path>,
+    hook_owner: Option<HookOwner>,
 ) -> ThreadForkParams {
+    let hook_owner = (thread_params_mode != ThreadParamsMode::Remote)
+        .then_some(hook_owner)
+        .flatten();
     let permissions = permissions_selection_from_config(&config, thread_params_mode);
     let sandbox = permissions
         .is_none()
@@ -2142,6 +2173,7 @@ fn thread_fork_params_from_config(
         .flatten();
     ThreadForkParams {
         thread_id: thread_id.to_string(),
+        hook_owner,
         model: config.model.clone(),
         model_provider: thread_params_mode.model_provider_from_config(&config),
         service_tier: service_tier_override_from_config(&config),
@@ -2488,6 +2520,10 @@ mod workspace_roots_tests;
 mod prompt_history_tests;
 
 #[cfg(test)]
+#[path = "app_server_session/hook_owner_request_tests.rs"]
+mod hook_owner_request_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::legacy_core::config::ConfigBuilder;
@@ -2785,6 +2821,7 @@ mod tests {
             ThreadParamsMode::Embedded,
             /*remote_cwd_override*/ None,
             /*session_start_source*/ None,
+            /*hook_owner*/ None,
         );
 
         assert_eq!(params.ephemeral, Some(true));
@@ -2835,6 +2872,7 @@ mod tests {
             ThreadParamsMode::Remote,
             /*remote_cwd_override*/ None,
             /*session_start_source*/ None,
+            /*hook_owner*/ None,
         );
 
         let overrides = params.config.expect("config overrides");
@@ -2897,6 +2935,7 @@ mod tests {
             ThreadParamsMode::Embedded,
             /*remote_cwd_override*/ None,
             /*session_start_source*/ None,
+            /*hook_owner*/ None,
         );
 
         assert_eq!(params.cwd, Some(config.cwd.to_string_lossy().to_string()));
@@ -2927,6 +2966,7 @@ mod tests {
             ThreadParamsMode::Embedded,
             /*remote_cwd_override*/ None,
             Some(ThreadStartSource::Clear),
+            /*hook_owner*/ None,
         );
 
         assert_eq!(params.session_start_source, Some(ThreadStartSource::Clear));
@@ -3144,6 +3184,7 @@ mod tests {
             ThreadParamsMode::Remote,
             /*remote_cwd_override*/ None,
             /*session_start_source*/ None,
+            /*hook_owner*/ None,
         );
         let resume = thread_resume_params_from_config(
             config.clone(),
@@ -3151,12 +3192,14 @@ mod tests {
             ThreadParamsMode::Remote,
             /*remote_cwd_override*/ None,
             ResumeModelSettings::OverrideFromCurrentConfig,
+            /*hook_owner*/ None,
         );
         let fork = thread_fork_params_from_config(
             config,
             thread_id,
             ThreadParamsMode::Remote,
             /*remote_cwd_override*/ None,
+            /*hook_owner*/ None,
         );
 
         assert_eq!(start.cwd, None);
@@ -3196,6 +3239,7 @@ mod tests {
             ThreadParamsMode::Remote,
             Some(remote_cwd.as_path()),
             ResumeModelSettings::RestoreFromThread,
+            /*hook_owner*/ None,
         );
 
         assert_eq!(resume.cwd, Some(remote_cwd.to_string_lossy().to_string()));
@@ -3285,6 +3329,7 @@ mod tests {
             ThreadParamsMode::Remote,
             Some(remote_cwd.as_path()),
             /*session_start_source*/ None,
+            /*hook_owner*/ None,
         );
         let resume = thread_resume_params_from_config(
             config.clone(),
@@ -3292,12 +3337,14 @@ mod tests {
             ThreadParamsMode::Remote,
             Some(remote_cwd.as_path()),
             ResumeModelSettings::OverrideFromCurrentConfig,
+            /*hook_owner*/ None,
         );
         let fork = thread_fork_params_from_config(
             config,
             thread_id,
             ThreadParamsMode::Remote,
             Some(remote_cwd.as_path()),
+            /*hook_owner*/ None,
         );
 
         assert_eq!(start.cwd.as_deref(), Some("repo/on/server"));
@@ -3340,6 +3387,7 @@ mod tests {
             ThreadParamsMode::Embedded,
             /*remote_cwd_override*/ None,
             /*session_start_source*/ None,
+            /*hook_owner*/ None,
         );
         let resume = thread_resume_params_from_config(
             config.clone(),
@@ -3347,12 +3395,14 @@ mod tests {
             ThreadParamsMode::Embedded,
             /*remote_cwd_override*/ None,
             ResumeModelSettings::OverrideFromCurrentConfig,
+            /*hook_owner*/ None,
         );
         let fork = thread_fork_params_from_config(
             config,
             thread_id,
             ThreadParamsMode::Embedded,
             /*remote_cwd_override*/ None,
+            /*hook_owner*/ None,
         );
 
         let expected_service_tier = Some(Some(ServiceTier::Fast.request_value().to_string()));
@@ -3393,6 +3443,7 @@ mod tests {
             ThreadParamsMode::Embedded,
             /*remote_cwd_override*/ None,
             ResumeModelSettings::RestoreFromThread,
+            /*hook_owner*/ None,
         );
 
         assert_eq!(params.model, None);
@@ -3424,6 +3475,7 @@ mod tests {
             ThreadParamsMode::Embedded,
             /*remote_cwd_override*/ None,
             ResumeModelSettings::PreserveExistingThread,
+            /*hook_owner*/ None,
         );
 
         assert_eq!(
@@ -3734,7 +3786,7 @@ mod tests {
         for mode in [ThreadParamsMode::Embedded, ThreadParamsMode::Remote] {
             let start = thread_start_params_from_config(
                 &config, mode, /*remote_cwd_override*/ None,
-                /*session_start_source*/ None,
+                /*session_start_source*/ None, /*hook_owner*/ None,
             );
             let resume = thread_resume_params_from_config(
                 config.clone(),
@@ -3742,12 +3794,14 @@ mod tests {
                 mode,
                 /*remote_cwd_override*/ None,
                 ResumeModelSettings::OverrideFromCurrentConfig,
+                /*hook_owner*/ None,
             );
             let fork = thread_fork_params_from_config(
                 config.clone(),
                 ThreadId::new(),
                 mode,
                 /*remote_cwd_override*/ None,
+                /*hook_owner*/ None,
             );
             for overrides in [start.config, resume.config, fork.config] {
                 assert_eq!(
@@ -3774,6 +3828,7 @@ mod tests {
             thread_id,
             ThreadParamsMode::Embedded,
             /*remote_cwd_override*/ None,
+            /*hook_owner*/ None,
         );
 
         assert_eq!(params.base_instructions.as_deref(), Some("Base override."));
@@ -3790,6 +3845,7 @@ mod tests {
             thread_id,
             ThreadParamsMode::Remote,
             /*remote_cwd_override*/ None,
+            /*hook_owner*/ None,
         );
 
         assert_eq!(params.base_instructions, None);
@@ -3846,6 +3902,7 @@ mod tests {
             ThreadParamsMode::Embedded,
             /*remote_cwd_override*/ None,
             /*session_start_source*/ None,
+            /*hook_owner*/ None,
         );
         let control_resume = thread_resume_params_from_config(
             config.clone(),
@@ -3853,12 +3910,14 @@ mod tests {
             ThreadParamsMode::Embedded,
             /*remote_cwd_override*/ None,
             ResumeModelSettings::OverrideFromCurrentConfig,
+            /*hook_owner*/ None,
         );
         let control_fork = thread_fork_params_from_config(
             config.clone(),
             thread_id,
             ThreadParamsMode::Embedded,
             /*remote_cwd_override*/ None,
+            /*hook_owner*/ None,
         );
 
         assert_eq!(control_start.developer_instructions, None);
@@ -3876,6 +3935,7 @@ mod tests {
             ThreadParamsMode::Embedded,
             /*remote_cwd_override*/ None,
             /*session_start_source*/ None,
+            /*hook_owner*/ None,
         );
         let treatment_resume = thread_resume_params_from_config(
             config.clone(),
@@ -3883,12 +3943,14 @@ mod tests {
             ThreadParamsMode::Embedded,
             /*remote_cwd_override*/ None,
             ResumeModelSettings::OverrideFromCurrentConfig,
+            /*hook_owner*/ None,
         );
         let treatment_fork = thread_fork_params_from_config(
             config,
             thread_id,
             ThreadParamsMode::Embedded,
             /*remote_cwd_override*/ None,
+            /*hook_owner*/ None,
         );
         let expected = format!(
             "Developer override.\n\n{}",

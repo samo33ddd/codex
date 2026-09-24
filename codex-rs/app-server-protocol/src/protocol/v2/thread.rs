@@ -32,6 +32,7 @@ pub use codex_protocol::dynamic_tools::DynamicToolNamespaceTool;
 pub use codex_protocol::dynamic_tools::DynamicToolSpec;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ReasoningEffort;
+use codex_protocol::protocol::HookOwner;
 use codex_protocol::protocol::ThreadGoalStatus as CoreThreadGoalStatus;
 use codex_protocol::protocol::TokenUsage as CoreTokenUsage;
 use codex_protocol::protocol::TokenUsageInfo as CoreTokenUsageInfo;
@@ -163,6 +164,10 @@ pub struct ThreadStartParams {
     #[experimental("thread/start.experimentalRawEvents")]
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub experimental_raw_events: bool,
+    /// Transient owner for hooks started by this local daemon request.
+    #[experimental("thread/start.hookOwner")]
+    #[ts(optional = nullable)]
+    pub hook_owner: Option<HookOwner>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq, JsonSchema, TS)]
@@ -428,6 +433,10 @@ pub struct ThreadResumeParams {
     #[experimental("thread/resume.initialTurnsPage")]
     #[ts(optional = nullable)]
     pub initial_turns_page: Option<ThreadResumeInitialTurnsPageParams>,
+    /// Transient owner for hooks started by this local daemon request.
+    #[experimental("thread/resume.hookOwner")]
+    #[ts(optional = nullable)]
+    pub hook_owner: Option<HookOwner>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS, ExperimentalApi)]
@@ -624,6 +633,10 @@ pub struct ThreadForkParams {
     #[experimental("thread/fork.deferGoalContinuation")]
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub defer_goal_continuation: bool,
+    /// Transient owner for hooks started by this local daemon request.
+    #[experimental("thread/fork.hookOwner")]
+    #[ts(optional = nullable)]
+    pub hook_owner: Option<HookOwner>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS, ExperimentalApi)]

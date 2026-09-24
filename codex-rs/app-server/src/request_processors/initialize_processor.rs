@@ -27,6 +27,7 @@ pub(crate) struct InitializeRequestProcessor {
     config: Arc<Config>,
     config_warnings: Arc<Vec<ConfigWarningNotification>>,
     rpc_transport: AppServerRpcTransport,
+    supports_hook_owner: bool,
     user_verification: Arc<crate::user_verification::Service>,
 }
 
@@ -38,6 +39,7 @@ impl InitializeRequestProcessor {
         config: Arc<Config>,
         config_warnings: Vec<ConfigWarningNotification>,
         rpc_transport: AppServerRpcTransport,
+        supports_hook_owner: bool,
         user_verification: Arc<crate::user_verification::Service>,
     ) -> Self {
         Self {
@@ -48,6 +50,7 @@ impl InitializeRequestProcessor {
             config,
             config_warnings: Arc::new(config_warnings),
             rpc_transport,
+            supports_hook_owner,
             user_verification,
         }
     }
@@ -214,6 +217,7 @@ impl InitializeRequestProcessor {
             codex_home,
             platform_family: std::env::consts::FAMILY.to_string(),
             platform_os: std::env::consts::OS.to_string(),
+            supports_hook_owner: self.supports_hook_owner,
         };
 
         self.outgoing

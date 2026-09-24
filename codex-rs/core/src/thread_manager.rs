@@ -47,6 +47,8 @@ use codex_features::Feature;
 use codex_history::InitialHistory;
 use codex_history::ResumedHistory;
 use codex_history::RolloutItem;
+use codex_hooks::HookOwnerChangePolicy;
+use codex_hooks::HookOwnerHandle;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
 use codex_login::default_client::CODEX_INTERNAL_ORIGINATOR_OVERRIDE_ENV_VAR;
@@ -65,6 +67,7 @@ use codex_protocol::mcp::OPENAI_STANDARD_FORM_INPUT_EXTENSION_ID;
 use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::HookOwner;
 use codex_protocol::protocol::InternalSessionSource;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::Op;
@@ -244,6 +247,7 @@ pub struct InternalSessionParent {
     pub(crate) agent_control: AgentControlInit,
     pub(crate) originator: String,
     pub(crate) inherited_instructions: Option<SessionInstructions>,
+    pub(crate) hook_owner_handle: HookOwnerHandle,
 }
 
 pub struct StartThreadOptions {
@@ -282,6 +286,8 @@ pub struct StartThreadOptions {
     pub reserved_thread_id: Option<ThreadId>,
     /// Initial thread-owned plugin selection; omission restores persisted settings.
     pub disabled_plugin_ids: Option<Vec<String>>,
+    /// Pane identity for a public local-daemon start, resume, or fork.
+    pub hook_owner: Option<HookOwner>,
 }
 
 impl StartThreadOptions {
@@ -305,6 +311,7 @@ impl StartThreadOptions {
             client_mcp_extensions: ClientMcpExtensions::default(),
             reserved_thread_id: None,
             disabled_plugin_ids: None,
+            hook_owner: None,
         }
     }
 }
@@ -322,6 +329,7 @@ struct ThreadSpawnRequest {
     inherited_instructions: Option<SessionInstructions>,
     inherited_exec_policy: Option<Arc<crate::exec_policy::ExecPolicyManager>>,
     user_shell_override: Option<crate::shell::Shell>,
+    hook_owner_handle: Option<HookOwnerHandle>,
 }
 
 impl ThreadSpawnRequest {
@@ -343,6 +351,7 @@ impl ThreadSpawnRequest {
             inherited_instructions: None,
             inherited_exec_policy: None,
             user_shell_override: None,
+            hook_owner_handle: None,
         }
     }
 }
@@ -874,12 +883,46 @@ impl ThreadManager {
         self.state.list_thread_ids().await
     }
 
+    /// List loaded threads that share the same hook-owner handle as `thread_id`.
+    pub async fn list_thread_ids_with_same_hook_owner(
+        &self,
+        thread_id: ThreadId,
+    ) -> CodexResult<Vec<ThreadId>> {
+        let thread = self.get_thread(thread_id).await?;
+        let hook_owner_handle = thread.session.hook_owner_handle();
+        let mut thread_ids = Vec::new();
+        for candidate_id in self.list_thread_ids().await {
+            if let Ok(candidate) = self.get_thread(candidate_id).await
+                && hook_owner_handle.is_same_handle(&candidate.session.hook_owner_handle())
+            {
+                thread_ids.push(candidate_id);
+            }
+        }
+        Ok(thread_ids)
+    }
+
     pub fn subscribe_thread_created(&self) -> broadcast::Receiver<ThreadId> {
         self.state.thread_created_tx.subscribe()
     }
 
     pub async fn get_thread(&self, thread_id: ThreadId) -> CodexResult<Arc<CodexThread>> {
         self.state.get_thread(thread_id).await
+    }
+
+    /// Replace the shared hook owner for a loaded thread family.
+    pub async fn replace_hook_owner_for_thread(
+        &self,
+        thread_id: ThreadId,
+        owner: HookOwner,
+        policy: HookOwnerChangePolicy,
+    ) -> CodexResult<()> {
+        self.get_thread(thread_id)
+            .await?
+            .session
+            .hook_owner_handle()
+            .replace_with_policy(owner, policy)
+            .await
+            .map_err(|error| CodexErr::InvalidRequest(error.to_string()))
     }
 
     /// Updates metadata for loaded and cold threads through one entrypoint.
@@ -1005,6 +1048,7 @@ impl ThreadManager {
     pub async fn start_thread(&self, options: StartThreadOptions) -> CodexResult<NewThread> {
         Box::pin(self.start_thread_inner(
             options, /*forked_from_thread_id*/ None, /*startup*/ None,
+            /*hook_owner_handle*/ None,
         ))
         .await
     }
@@ -1066,6 +1110,7 @@ impl ThreadManager {
             },
             originator: parent.config_snapshot().await.originator,
             inherited_instructions,
+            hook_owner_handle: parent.session.hook_owner_handle(),
         });
         self.start_thread(options).await
     }
@@ -1080,6 +1125,7 @@ impl ThreadManager {
         mut options: StartThreadOptions,
         forked_from_thread_id: Option<ThreadId>,
         startup: Option<Arc<crate::session::startup::SessionStartup>>,
+        hook_owner_handle: Option<HookOwnerHandle>,
     ) -> CodexResult<NewThread> {
         let (resumed_session_source, resumed_thread_source) = options
             .initial_history
@@ -1093,6 +1139,16 @@ impl ThreadManager {
         );
         options.thread_source = options.thread_source.take().or(resumed_thread_source);
         let parent = options.internal_parent.take();
+        if (parent.is_some() || hook_owner_handle.is_some()) && options.hook_owner.is_some() {
+            return Err(CodexErr::InvalidRequest(
+                "internal child sessions inherit their hook owner".to_owned(),
+            ));
+        }
+        if parent.is_some() && hook_owner_handle.is_some() {
+            return Err(CodexErr::InvalidRequest(
+                "internal child session received multiple hook owners".to_owned(),
+            ));
+        }
         if parent.is_some()
             && (!matches!(options.session_source, Some(SessionSource::Internal(_)))
                 || matches!(options.initial_history, InitialHistory::Resumed(_)))
@@ -1107,6 +1163,7 @@ impl ThreadManager {
             request.parent_thread_id = Some(parent.thread_id);
             request.parent_originator = Some(parent.originator);
             request.inherited_instructions = parent.inherited_instructions;
+            request.hook_owner_handle = Some(parent.hook_owner_handle);
             request.forked_from_thread_id = request.options.initial_history.forked_from_id();
             request
         } else {
@@ -1117,6 +1174,7 @@ impl ThreadManager {
                 agent_control,
             );
             request.forked_from_thread_id = forked_from_thread_id;
+            request.hook_owner_handle = hook_owner_handle;
             request
         };
         request.startup = startup;
@@ -1156,8 +1214,13 @@ impl ThreadManager {
                 inherited_multi_agent_version,
             ),
         );
-        self.start_thread_inner(options, Some(forked_from_thread_id), /*startup*/ None)
-            .await
+        self.start_thread_inner(
+            options,
+            Some(forked_from_thread_id),
+            /*startup*/ None,
+            Some(fork_source.session.hook_owner_handle()),
+        )
+        .await
     }
 
     pub async fn resume_thread_from_rollout(
@@ -1222,6 +1285,27 @@ impl ThreadManager {
         parent_trace: Option<W3cTraceContext>,
         client_mcp_extensions: ClientMcpExtensions,
     ) -> CodexResult<NewThread> {
+        self.resume_thread_with_history_and_hook_owner(
+            config,
+            initial_history,
+            auth_manager,
+            parent_trace,
+            client_mcp_extensions,
+            None,
+        )
+        .await
+    }
+
+    /// Resume a public thread while installing the current local-daemon owner before hooks run.
+    pub async fn resume_thread_with_history_and_hook_owner(
+        &self,
+        config: Config,
+        initial_history: InitialHistory,
+        auth_manager: Arc<AuthManager>,
+        parent_trace: Option<W3cTraceContext>,
+        client_mcp_extensions: ClientMcpExtensions,
+        hook_owner: Option<HookOwner>,
+    ) -> CodexResult<NewThread> {
         let agent_control = self.agent_control_for_config(&config);
         let (session_source, thread_source) = initial_history
             .get_resumed_session_sources()
@@ -1232,6 +1316,7 @@ impl ThreadManager {
             thread_source,
             parent_trace,
             client_mcp_extensions,
+            hook_owner,
             ..StartThreadOptions::new(config)
         };
         Box::pin(self.state.spawn_thread(ThreadSpawnRequest::new(
@@ -2010,6 +2095,7 @@ impl ThreadManagerState {
             inherited_instructions,
             inherited_exec_policy,
             user_shell_override,
+            hook_owner_handle,
         } = request;
         let StartThreadOptions {
             mut config,
@@ -2030,6 +2116,7 @@ impl ThreadManagerState {
             client_mcp_extensions,
             reserved_thread_id,
             disabled_plugin_ids,
+            hook_owner,
         } = options;
         let inherited_environments = captured_environments.or(inherited_environments);
         let session_source = session_source.unwrap_or_else(|| self.session_source.clone());
@@ -2178,6 +2265,27 @@ impl ThreadManagerState {
         };
         let attachment_source =
             forked_from_thread_id.filter(|_| matches!(&initial_history, InitialHistory::Forked(_)));
+        let hook_owner_handle = match (hook_owner_handle, hook_owner) {
+            (Some(handle), None) => handle,
+            (Some(_), Some(_)) => {
+                return Err(CodexErr::InvalidRequest(
+                    "internal child sessions inherit their hook owner".to_owned(),
+                ));
+            }
+            (None, Some(owner)) => HookOwnerHandle::for_managed_session(owner)
+                .map_err(|error| CodexErr::InvalidRequest(error.to_string()))?,
+            (None, None) => {
+                if let Some(parent_thread_id) = parent_thread_id {
+                    match self.get_thread(parent_thread_id).await {
+                        Ok(parent) => parent.session.hook_owner_handle(),
+                        Err(error) if session_source.is_non_root_agent() => return Err(error),
+                        Err(_) => HookOwnerHandle::default(),
+                    }
+                } else {
+                    HookOwnerHandle::default()
+                }
+            }
+        };
         let (session, io) = Session::spawn(SessionSpawnArgs {
             startup,
             config,
@@ -2222,6 +2330,7 @@ impl ThreadManagerState {
             environment_selections: environments,
             thread_extension_init,
             client_mcp_extensions,
+            hook_owner_handle,
             reserved_thread_id,
             analytics_events_client: self.analytics_events_client.clone(),
             image_store: Arc::clone(&self.image_store),

@@ -175,6 +175,7 @@ async fn new_tui_threads_disable_summaries_unless_explicitly_enabled() {
             ThreadParamsMode::Embedded,
             /*remote_cwd_override*/ None,
             /*session_start_source*/ None,
+            /*hook_owner*/ None,
         );
         let overrides = start.config.expect("thread config");
         assert_eq!(
@@ -205,6 +206,7 @@ async fn new_tui_threads_disable_summaries_unless_explicitly_enabled() {
         ThreadParamsMode::Embedded,
         /*remote_cwd_override*/ None,
         /*session_start_source*/ None,
+        /*hook_owner*/ None,
     );
     let overrides = start.config.expect("thread config");
     assert_eq!(overrides["model_reasoning_summary"], "none");

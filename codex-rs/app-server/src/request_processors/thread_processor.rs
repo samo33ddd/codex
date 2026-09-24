@@ -3,6 +3,8 @@ mod daemon_continuation;
 
 #[path = "daemon_snapshot.rs"]
 mod daemon_snapshot;
+#[path = "hook_owner_resume.rs"]
+mod hook_owner_resume;
 
 use super::persisted_resume_settings::PersistedResumeSettings;
 use super::persisted_resume_settings::latest_persisted_resume_settings;
@@ -1159,6 +1161,7 @@ impl ThreadRequestProcessor {
             project_id,
             daybreak_enabled,
             environments,
+            hook_owner,
         } = params;
         if matches!(
             history_mode,
@@ -1240,6 +1243,7 @@ impl ThreadRequestProcessor {
                 typesafe_overrides,
                 dynamic_tools,
                 selected_capability_roots.unwrap_or_default(),
+                hook_owner,
                 history_mode.map(Into::into),
                 session_start_source,
                 thread_source.map(Into::into),
@@ -1322,6 +1326,7 @@ impl ThreadRequestProcessor {
         typesafe_overrides: ConfigOverrides,
         dynamic_tools: Option<Vec<DynamicToolSpec>>,
         selected_capability_roots: Vec<SelectedCapabilityRoot>,
+        hook_owner: Option<codex_protocol::protocol::HookOwner>,
         history_mode: Option<ThreadHistoryMode>,
         session_start_source: Option<codex_app_server_protocol::ThreadStartSource>,
         thread_source: Option<codex_protocol::protocol::ThreadSource>,
@@ -1487,6 +1492,7 @@ impl ThreadRequestProcessor {
             .thread_manager
             .start_thread(StartThreadOptions {
                 allow_provider_model_fallback,
+                hook_owner,
                 initial_history: match session_start_source
                     .unwrap_or(codex_app_server_protocol::ThreadStartSource::Startup)
                 {
@@ -3671,6 +3677,7 @@ impl ThreadRequestProcessor {
             sandbox,
             permissions,
             config: mut request_overrides,
+            hook_owner,
             base_instructions,
             developer_instructions,
             personality,
@@ -3926,7 +3933,7 @@ impl ThreadRequestProcessor {
 
         match self
             .thread_manager
-            .resume_thread_with_history(
+            .resume_thread_with_history_and_hook_owner(
                 config,
                 thread_history,
                 self.auth_manager.clone(),
@@ -3937,6 +3944,7 @@ impl ThreadRequestProcessor {
                     ThreadResumeTarget::DaemonRecovery(_) => None,
                 },
                 client_mcp_extensions,
+                hook_owner,
             )
             .await
         {
@@ -4289,6 +4297,40 @@ impl ThreadRequestProcessor {
                 )));
             }
             let config_snapshot = existing_thread.config_snapshot().await;
+            if let Some(hook_owner) = params.hook_owner.clone() {
+                let family_thread_ids = self
+                    .thread_manager
+                    .list_thread_ids_with_same_hook_owner(existing_thread_id)
+                    .await;
+                let family_thread_ids = family_thread_ids.map_err(|err| {
+                    invalid_request(format!(
+                        "failed to find loaded hook owner family for running thread {existing_thread_id}: {err}"
+                    ))
+                })?;
+                let mut subscribed_connection_ids = Vec::new();
+                for family_thread_id in family_thread_ids {
+                    subscribed_connection_ids.extend(
+                        self.thread_state_manager
+                            .subscribed_connection_ids(family_thread_id)
+                            .await,
+                    );
+                }
+                self.thread_manager
+                    .replace_hook_owner_for_thread(
+                        existing_thread_id,
+                        hook_owner,
+                        hook_owner_resume::change_policy(
+                            &subscribed_connection_ids,
+                            request_id.connection_id,
+                        ),
+                    )
+                    .await
+                    .map_err(|err| {
+                        invalid_request(format!(
+                            "failed to update hook owner for running thread {existing_thread_id}: {err}"
+                        ))
+                    })?;
+            }
             let mismatch_details = collect_resume_override_mismatches(params, &config_snapshot);
             if !mismatch_details.is_empty() {
                 let has_subscribers = !self
@@ -4837,6 +4879,7 @@ impl ThreadRequestProcessor {
             developer_instructions,
             ephemeral,
             thread_source,
+            hook_owner,
             exclude_turns,
             defer_goal_continuation,
         } = params;
@@ -5134,6 +5177,7 @@ impl ThreadRequestProcessor {
             parent_trace,
             client_mcp_extensions,
             reserved_thread_id,
+            hook_owner,
             ..StartThreadOptions::new(config)
         };
         let new_thread = if let Some(prepared_fork) = prepared_fork {

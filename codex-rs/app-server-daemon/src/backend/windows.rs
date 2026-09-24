@@ -35,8 +35,8 @@ use windows_sys::Win32::System::JobObjects::JOBOBJECT_EXTENDED_LIMIT_INFORMATION
 use windows_sys::Win32::System::JobObjects::JobObjectExtendedLimitInformation;
 use windows_sys::Win32::System::JobObjects::SetInformationJobObject;
 use windows_sys::Win32::System::Threading::CREATE_BREAKAWAY_FROM_JOB;
+use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
 use windows_sys::Win32::System::Threading::CREATE_SUSPENDED;
-use windows_sys::Win32::System::Threading::DETACHED_PROCESS;
 use windows_sys::Win32::System::Threading::GetCurrentProcess;
 use windows_sys::Win32::System::Threading::GetProcessId;
 use windows_sys::Win32::System::Threading::GetProcessTimes;
@@ -48,6 +48,8 @@ use windows_sys::Win32::System::Threading::PROCESS_SYNCHRONIZE;
 use windows_sys::Win32::System::Threading::PROCESS_TERMINATE;
 use windows_sys::Win32::System::Threading::TerminateProcess;
 use windows_sys::Win32::System::Threading::WaitForSingleObject;
+
+pub(super) const DAEMON_PROCESS_CREATION_FLAGS: u32 = CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB;
 
 pub(crate) fn ensure_not_elevated() -> Result<()> {
     let mut token = 0;
@@ -81,7 +83,7 @@ pub(crate) fn ensure_not_elevated() -> Result<()> {
 // job attached. Suspend the image so no application code runs before cleanup.
 pub(crate) fn ensure_detached_launch(executable: &Path) -> Result<()> {
     let mut child = Command::new(executable)
-        .creation_flags(CREATE_SUSPENDED | DETACHED_PROCESS | CREATE_BREAKAWAY_FROM_JOB)
+        .creation_flags(CREATE_SUSPENDED | DAEMON_PROCESS_CREATION_FLAGS)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
