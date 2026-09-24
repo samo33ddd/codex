@@ -1,9 +1,19 @@
+use super::DAEMON_PROCESS_CREATION_FLAGS;
 use super::Process;
 use pretty_assertions::assert_eq;
 use std::os::windows::io::AsRawHandle;
+use std::os::windows::process::CommandExt;
+use std::process::Stdio;
 use windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED;
+use windows_sys::Win32::System::Threading::CREATE_BREAKAWAY_FROM_JOB;
 use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
 use windows_sys::Win32::System::Threading::TerminateProcess;
+
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    #[link_name = "GetConsoleWindow"]
+    fn get_console_window() -> *mut std::ffi::c_void;
+}
 
 #[test]
 fn detached_launch_preflight_rejects_restrictive_job() {
@@ -43,6 +53,67 @@ fn detached_launch_preflight_rejects_restrictive_job() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+}
+
+#[test]
+fn daemon_default_children_do_not_open_console_windows() {
+    const PARENT_REPORT: &str = "CODEX_TEST_DAEMON_CONSOLE_PARENT_REPORT";
+    const CHILD_REPORT: &str = "CODEX_TEST_DAEMON_CONSOLE_CHILD_REPORT";
+    const TEST_NAME: &str =
+        "backend::windows::tests::daemon_default_children_do_not_open_console_windows";
+    let executable = std::env::current_exe().expect("test executable");
+
+    if let Some(path) = std::env::var_os(CHILD_REPORT) {
+        let console_window = unsafe { get_console_window() } as usize;
+        std::fs::write(path, console_window.to_string()).expect("write console window handle");
+        return;
+    }
+
+    if let Some(path) = std::env::var_os(PARENT_REPORT) {
+        let report_path = std::path::PathBuf::from(path);
+        let child_report_path = report_path.with_extension("grandchild");
+        let status = std::process::Command::new(executable)
+            .args(["--exact", TEST_NAME, "--nocapture"])
+            .env(CHILD_REPORT, &child_report_path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("spawn default daemon child");
+        assert!(status.success(), "default daemon child test failed");
+        let console_window = std::fs::read_to_string(child_report_path)
+            .expect("read console window handle")
+            .parse::<usize>()
+            .expect("parse console window handle");
+        std::fs::write(&report_path, console_window.to_string()).expect("write parent report");
+        return;
+    }
+
+    let report_dir = tempfile::tempdir().expect("temporary report directory");
+    let report_path = report_dir.path().join("console-window.txt");
+    let output = std::process::Command::new(executable)
+        .args(["--exact", TEST_NAME, "--nocapture"])
+        .env(PARENT_REPORT, &report_path)
+        .creation_flags(DAEMON_PROCESS_CREATION_FLAGS & !CREATE_BREAKAWAY_FROM_JOB)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("spawn daemon process");
+    assert!(
+        output.status.success(),
+        "daemon process test failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let console_window = std::fs::read_to_string(report_path)
+        .expect("read console window handle")
+        .parse::<usize>()
+        .expect("parse console window handle");
+    assert_eq!(
+        console_window, 0,
+        "default child of daemon process received console window {console_window:#x}"
+    );
 }
 
 #[tokio::test]

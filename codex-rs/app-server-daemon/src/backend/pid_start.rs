@@ -147,8 +147,7 @@ impl PidBackend {
 
         #[cfg(windows)]
         {
-            use windows_sys::Win32::System::Threading::CREATE_BREAKAWAY_FROM_JOB;
-            use windows_sys::Win32::System::Threading::DETACHED_PROCESS;
+            use super::super::windows::DAEMON_PROCESS_CREATION_FLAGS;
             // Preserve process-scoped paths before changing cwd; CA names match CUSTOM_CA_ENV_KEYS.
             for name in [
                 "CODEX_HOME",
@@ -206,7 +205,7 @@ impl PidBackend {
             );
             // Never retry inside the parent's Job Object: that would report a
             // successful launch that dies when the terminal/SSH session closes.
-            command.creation_flags(DETACHED_PROCESS | CREATE_BREAKAWAY_FROM_JOB);
+            command.creation_flags(DAEMON_PROCESS_CREATION_FLAGS);
             if matches!(self.command_kind, PidCommandKind::UpdateLoop { .. }) {
                 match fs::remove_file(self.pid_file.with_extension("ready")).await {
                     Ok(()) => {}
