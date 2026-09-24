@@ -86,3 +86,52 @@ Only the client changed; the compatible shared daemon remained running.
 Evidence: E:/tmp/orca-daemon-threads-delivery/tui-effort-focused-tests.log,
 tui-effort-independent-review.json, tui-thread-api-screen.txt and
 tui-effort-client-install.json.
+
+## Real-session Orca and Tavily presentation (2026-09-24)
+
+The quoted PowerShell call-operator form used by Orca is now recognized without
+removing its executable before parsing. A bounded literal here-string path
+supports orchestration messages; interpolation, comments that can hide another
+command, and compound/dynamic commands retain the raw fallback. Lifecycle
+commands have readable labels. Actual codex_apps Tavily search/extract names
+show the query or URLs, while complete commands, results and errors remain
+available through Show details.
+
+Validation:
+- The production-helper standalone regression run changed from four failures
+  to nine passing tests, including ambiguous-string/comment fallback cases.
+- Independent gpt-6-astra/low review of the frozen diff found two parsing edge
+  cases; both were corrected and rechecked with no remaining actionable P1/P2.
+- CLI build passed. The staged binary was exercised in a new background Orca
+  terminal: terminal show, worker-show, a literal multi-line send, deliberate
+  missing-terminal failure, live Tavily search and live Tavily extract.
+- Root inspected the actual PTY screen. Readable labels and query/URL details
+  were present; successful raw JSON was collapsed. Keyboard disclosure exposed
+  the complete Tavily result and original failed command, terminal_handle_stale,
+  and exit code 1. These are PTY screen captures, not image screenshots.
+- Full `just test -p codex-tui`: 5342 passed (299 leaky), 97 failed, 9 skipped.
+  This is not a green full suite. Failures include alpha-version snapshots,
+  session and terminal/cursor cases outside this diff. One related old help
+  assertion incorrectly expected an unescaped Windows path and was isolated
+  for correction; the other twelve related tests passed in the full run.
+- After the test-only correction, the final focused run passed all 13 tests
+  (5421 filtered out); see real-session-final-focused.log. The full suite was
+  not rerun after that correction.
+- `just fmt` hit existing Windows limitations (long command line and missing
+  dotslash buildifier; the Python encoding retry used PYTHONUTF8=1). Pinned
+  rustfmt 1.95 was used on the eight changed Rust files.
+
+The official `app-server daemon update --from-cli --yes` installed and pinned
+only the client package under `C:/Users/krach/.codex`. Installed version:
+0.158.0-alpha.8. Installed SHA256 matches the runtime-tested candidate:
+E2C761F29F4D4F4B7565F412C05BE743DB025022205009F6640E625006126194.
+The live Orca command setting still selects that home's current/bin/codex.exe.
+The shared runtime-home server PID 25040 and its creation time were unchanged.
+Already-open clients retain their existing binary; new terminals use this fix.
+
+Local evidence: `E:/tmp/orca-daemon-threads-delivery/real-session-cli-build.log`,
+`real-session-full-tui-tests.log`, `presentation-standalone-green.log`,
+`real-session-orca-screen.json`, `real-session-mcp-screen.json`,
+`real-session-details-screen.json`, `real-session-error-details-screen.json`.
+Raw orchestration receipts are not published because they contain capability
+credentials. Repository issues are disabled; no issue was published or enabled.

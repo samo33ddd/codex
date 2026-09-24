@@ -153,7 +153,7 @@ impl McpToolCallCell {
         let compact = node_repl && mode == McpToolCallRenderMode::Display;
         let semantic = (mode == McpToolCallRenderMode::Display)
             .then(|| {
-                crate::orca_presentation::codex_tui_action(
+                crate::orca_presentation::mcp_action_preview(
                     &self.invocation.server,
                     &self.invocation.tool,
                     self.invocation.arguments.as_ref(),

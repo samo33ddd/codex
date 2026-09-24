@@ -478,7 +478,6 @@ impl ExecCell {
                 &[HyperlinkLine::new(header)],
                 RtOptions::new(usize::from(width).max(1)).subsequent_indent("    ".into()),
             );
-            let had_detail = action.detail.is_some();
             let detail = action.detail.or_else(|| {
                 (!action.help && success == Some(true))
                     .then(|| {
@@ -503,12 +502,7 @@ impl ExecCell {
             }
             return CommandDisplay {
                 lines,
-                hidden_details: action.help
-                    || had_detail
-                    || call
-                        .output
-                        .as_ref()
-                        .is_some_and(|output| output.line_counts().0 > 0),
+                hidden_details: true,
             };
         }
         let layout = EXEC_DISPLAY_LAYOUT;
@@ -1419,15 +1413,17 @@ mod tests {
     #[test]
     fn orca_help_uses_semantic_preview_but_keeps_full_transcript() {
         let executable = r"C:\Program Files\Orca\orca.exe";
+        let command = vec![
+            executable.into(),
+            "orchestration".into(),
+            "worker-start".into(),
+            "--help".into(),
+        ];
+        let escaped_command = crate::exec_command::escape_command(&command);
         let cell = ExecCell::new(
             ExecCall {
                 call_id: "orca-help".into(),
-                command: vec![
-                    executable.into(),
-                    "orchestration".into(),
-                    "worker-start".into(),
-                    "--help".into(),
-                ],
+                command,
                 parsed: Vec::new(),
                 output: Some(CommandOutput::new(
                     0,
@@ -1452,7 +1448,7 @@ mod tests {
             .map(ToString::to_string)
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(transcript.contains(executable));
+        assert!(transcript.contains(&escaped_command));
         assert!(transcript.contains("Usage: worker-start"));
 
         let failure = ExecCell::new(

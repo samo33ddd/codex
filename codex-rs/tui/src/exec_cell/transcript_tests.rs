@@ -88,3 +88,47 @@ fn raw_grouped_history_retains_terminal_input_and_omits_reasoning() {
         expected_rich
     );
 }
+
+#[test]
+fn semantic_orca_preview_keeps_raw_command_and_output_reachable() {
+    let command = vec![
+        r"C:\Program Files\PowerShell\7\pwsh.exe".to_owned(),
+        "-NoProfile".to_owned(),
+        "-Command".to_owned(),
+        r"& 'C:\Users\krach\AppData\Local\Programs\orca\resources\bin\orca.exe' terminal show --terminal 'term_793cb9bd-90ee-4f3b-8661-dcf926f4b937' --json".to_owned(),
+    ];
+    let output = r#"{"ok":true}"#;
+    let cell = ExecCell::new(
+        ExecCall {
+            call_id: "orca-terminal-show".to_owned(),
+            parsed: codex_shell_command::parse_command::parse_command(&command),
+            command,
+            output: Some(CommandOutput::new(0, output.to_owned())),
+            source: CommandExecutionSource::Agent,
+            start_time: None,
+            duration: Some(Duration::ZERO),
+            interaction_input: None,
+        },
+        /*animations_enabled*/ false,
+    );
+
+    let compact = cell
+        .compact_hyperlink_lines(/*width*/ 100)
+        .iter()
+        .map(|line| line.line.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(compact.contains("команда Orca: состояние терминала"));
+    assert!(!compact.contains("terminal show"));
+    assert!(!compact.contains("{\"ok\":true}"));
+    assert!(cell.has_hidden_activity_details(/*width*/ 100));
+
+    let transcript = cell
+        .transcript_lines(/*width*/ 200)
+        .iter()
+        .map(Line::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(transcript.contains("terminal show"));
+    assert!(transcript.contains(output));
+}
