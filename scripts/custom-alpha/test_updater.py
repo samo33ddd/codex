@@ -5,9 +5,13 @@ import json
 import base64
 import hashlib
 import io
+import os
+import signal
 import sys
+import subprocess
 import tarfile
 import tempfile
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -133,6 +137,26 @@ def main():
         assert update._managed_daemon_home(fixture, daemon_paths) == str(home)
         assert update._managed_daemon_home({**fixture, "CommandLine": f'"{extended}" app-server --listen unix://'}, daemon_paths) is None
         assert update._managed_daemon_home({**fixture, "ExecutablePath": str(Path(folder) / "codex.exe")}, daemon_paths) is None
+
+        pid_file = Path(folder) / "pipe-holder.pid"
+        child_code = "import time; time.sleep(3)"
+        parent_code = (
+            "import pathlib,subprocess,sys; "
+            f"child=subprocess.Popen([sys.executable,'-c',{child_code!r}], "
+            f"creationflags={getattr(subprocess, 'CREATE_NO_WINDOW', 0)}); "
+            f"pathlib.Path({str(pid_file)!r}).write_text(str(child.pid)); "
+            "print('parent done',flush=True)"
+        )
+        started = time.monotonic()
+        result = update._run([sys.executable, "-c", parent_code], check=False, file_output=True)
+        elapsed = time.monotonic() - started
+        if pid_file.exists():
+            try:
+                os.kill(int(pid_file.read_text()), signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        assert result.returncode == 0 and "parent done" in result.stdout
+        assert elapsed < 2.5, f"_run waited for the child-held output handle ({elapsed:.2f}s)"
 
     print("custom-alpha updater checks passed")
 
