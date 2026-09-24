@@ -15,9 +15,13 @@ pub(crate) struct ActionPreview {
 pub(crate) fn safe_output_preview(text: &str) -> Option<String> {
     let text = text.lines().next()?.trim();
     if text.is_empty()
+        || text.starts_with('{')
+        || text.starts_with('[')
         || text.contains(":\\")
         || text.to_ascii_lowercase().contains(".exe")
-        || text.split(|ch: char| !ch.is_ascii_hexdigit() && ch != '-').any(is_uuid)
+        || text
+            .split(|ch: char| !ch.is_ascii_hexdigit() && ch != '-')
+            .any(is_uuid)
     {
         return None;
     }
@@ -76,9 +80,7 @@ pub(crate) fn orca_cli_action(command: &[String]) -> Option<ActionPreview> {
         return None;
     };
     let executable = executable.rsplit(['\\', '/']).next()?.trim_matches('"');
-    if !executable.eq_ignore_ascii_case("orca")
-        && !executable.eq_ignore_ascii_case("orca.exe")
-    {
+    if !executable.eq_ignore_ascii_case("orca") && !executable.eq_ignore_ascii_case("orca.exe") {
         return None;
     }
 
@@ -100,19 +102,20 @@ pub(crate) fn orca_cli_action(command: &[String]) -> Option<ActionPreview> {
     } else {
         format!("команда Orca: {label}")
     };
-    let detail = (!help).then(|| match group.as_str() {
-        "orchestration" if subcommand == "ask" => flag_value(args, &["--question"]),
-        "orchestration" if subcommand == "send" => {
-            flag_value(args, &["--subject"]).or_else(|| flag_value(args, &["--body"]))
-        }
-        "orchestration" if subcommand == "worker-start" => {
-            flag_value(args, &["--subject", "--task", "--title"])
-        }
-        "terminal" => flag_value(args, &["--text", "--input"]),
-        _ => None,
-    })
-    .flatten()
-    .and_then(preview_text);
+    let detail = (!help)
+        .then(|| match group.as_str() {
+            "orchestration" if subcommand == "ask" => flag_value(args, &["--question"]),
+            "orchestration" if subcommand == "send" => {
+                flag_value(args, &["--subject"]).or_else(|| flag_value(args, &["--body"]))
+            }
+            "orchestration" if subcommand == "worker-start" => {
+                flag_value(args, &["--subject", "--task", "--title"])
+            }
+            "terminal" => flag_value(args, &["--text", "--input"]),
+            _ => None,
+        })
+        .flatten()
+        .and_then(preview_text);
     Some(ActionPreview {
         action,
         detail,

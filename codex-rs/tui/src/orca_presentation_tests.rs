@@ -1,5 +1,6 @@
 use super::codex_tui_action;
 use super::orca_cli_action;
+use super::safe_output_preview;
 use serde_json::json;
 
 #[test]
@@ -43,5 +44,22 @@ fn compound_and_unknown_commands_fall_back() {
         "orca orchestration worker-start --help && echo done".to_owned(),
     ];
     assert!(orca_cli_action(&compound).is_none());
-    assert!(orca_cli_action(&["other-tool".to_owned(), "orchestration".to_owned(), "check".to_owned()]).is_none());
+    assert!(
+        orca_cli_action(&[
+            "other-tool".to_owned(),
+            "orchestration".to_owned(),
+            "check".to_owned()
+        ])
+        .is_none()
+    );
+}
+
+#[test]
+fn safe_output_preview_skips_json_structure_lines() {
+    assert_eq!(safe_output_preview("{\n  \"ok\": true\n}"), None);
+    assert_eq!(safe_output_preview(" [\n  1\n]"), None);
+    assert_eq!(
+        safe_output_preview("Status: ready"),
+        Some("Status: ready".to_owned())
+    );
 }
