@@ -151,6 +151,15 @@ impl McpToolCallCell {
         let status = self.success();
         let node_repl = self.result_kind() == McpResultKind::NodeRepl;
         let compact = node_repl && mode == McpToolCallRenderMode::Display;
+        let semantic = (mode == McpToolCallRenderMode::Display)
+            .then(|| {
+                crate::orca_presentation::codex_tui_action(
+                    &self.invocation.server,
+                    &self.invocation.tool,
+                    self.invocation.arguments.as_ref(),
+                )
+            })
+            .flatten();
         let bullet = match status {
             Some(true) => "•".green().bold(),
             Some(false) => "•".red().bold(),
@@ -176,7 +185,9 @@ impl McpToolCallCell {
             .and_then(serde_json::Value::as_str)
             .map(|title| title.split_whitespace().collect::<Vec<_>>().join(" "))
             .filter(|title| !title.is_empty());
-        let invocation_line = if compact {
+        let invocation_line = if let Some(semantic) = &semantic {
+            Line::from(semantic.action.clone().fg(accent_color()))
+        } else if compact {
             Line::from(
                 title
                     .clone()
@@ -221,7 +232,21 @@ impl McpToolCallCell {
             ));
         }
 
-        let detail_lines = self.render_detail_lines(width, mode);
+        let detail_lines = if let Some(semantic) = &semantic {
+            if status == Some(false) {
+                self.render_detail_lines(width, mode)
+            } else {
+                semantic.detail.as_ref().map_or_else(Vec::new, |detail| {
+                    let line = Line::from(format!("«{detail}»").dim());
+                    adaptive_wrap_hyperlink_lines(
+                        &[HyperlinkLine::new(line)],
+                        RtOptions::new(usize::from(width).saturating_sub(4).max(1)),
+                    )
+                })
+            }
+        } else {
+            self.render_detail_lines(width, mode)
+        };
         if !detail_lines.is_empty() {
             let initial_prefix = if inline_invocation {
                 "  └ ".dim()

@@ -142,6 +142,7 @@ mod dynamic_tools;
 mod dynamic_tools_mcp;
 mod empty_state_animation;
 mod exec_cell;
+mod orca_presentation;
 mod exec_command;
 mod external_agent_config_migration;
 mod external_editor;

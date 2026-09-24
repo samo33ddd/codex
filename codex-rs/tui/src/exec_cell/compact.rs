@@ -8,7 +8,10 @@ use crate::history_cell::activity_preview::clipped_line;
 use crate::motion::MotionMode;
 use crate::motion::ReducedMotionIndicator;
 use crate::motion::activity_indicator;
+use crate::orca_presentation::orca_cli_action;
+use crate::orca_presentation::safe_output_preview;
 use crate::render::highlight::highlight_bash_to_lines;
+use crate::style::accent_color;
 use crate::terminal_hyperlinks::HyperlinkLine;
 use codex_ansi_escape::ansi_escape_line;
 use ratatui::style::Modifier;
@@ -49,6 +52,68 @@ impl ExecCell {
         let [call] = self.group.calls.as_slice() else {
             return Vec::new();
         };
+        if let Some(action) = orca_cli_action(&call.command) {
+            let failed = call.output.as_ref().filter(|output| output.exit_code != 0);
+            let marker = if failed.is_some() {
+                "•".red().bold()
+            } else if self.is_active() {
+                activity_indicator(
+                    call.start_time,
+                    MotionMode::from_animations_enabled(self.animations_enabled()),
+                    ReducedMotionIndicator::StaticBullet,
+                )
+                .unwrap_or_else(|| "•".dim())
+            } else {
+                "•".green().bold()
+            };
+            let status = if failed.is_some() {
+                "Ошибка"
+            } else if self.is_active() {
+                "Выполняется"
+            } else {
+                "Успешно"
+            };
+            let mut lines = vec![clipped_line(
+                Line::from(vec![
+                    marker,
+                    " ".into(),
+                    status.bold(),
+                    " · ".dim(),
+                    action.action.fg(accent_color()),
+                ]),
+                width,
+            )];
+            let detail = action.detail.or_else(|| {
+                (!action.help && failed.is_none() && !self.is_active())
+                    .then(|| {
+                        call.output
+                            .as_ref()?
+                            .lines()
+                            .next()
+                            .and_then(|line| safe_output_preview(&line))
+                    })
+                    .flatten()
+            });
+            if let Some(detail) = detail {
+                lines.push(clipped_line(
+                    Line::from(vec!["  └ ".dim(), format!("«{detail}»").dim()]),
+                    width,
+                ));
+            }
+            if let Some(output) = failed {
+                let tail: Vec<_> = output.lines().rev().take(DETAIL_PREVIEW_LINES).collect();
+                for (index, raw) in tail.into_iter().rev().enumerate() {
+                    let mut line = ansi_escape_line(raw.as_ref());
+                    line.spans
+                        .insert(0, if index == 0 { "  └ " } else { "    " }.dim());
+                    line.spans.iter_mut().for_each(|span| {
+                        span.style = span.style.add_modifier(Modifier::DIM);
+                    });
+                    lines.push(clipped_line(line, width));
+                }
+            }
+            return lines;
+        }
         if call.is_unified_exec_interaction()
             && !self.is_active()
             && call.output.as_ref().is_some_and(|output| {

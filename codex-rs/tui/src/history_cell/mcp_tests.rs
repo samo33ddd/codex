@@ -190,6 +190,60 @@ fn mcp_preview_shares_one_limit_across_blocks_and_preserves_transcript() {
 }
 
 #[test]
+fn codex_tui_send_message_uses_prompt_without_exposing_thread_id() {
+    let thread_id = "025e4ed2-490f-49ef-bfac-814625506917";
+    let prompt = "Please summarize the latest status";
+    let mut cell = new_active_mcp_tool_call(
+        "codex-tui-send".into(),
+        McpInvocation {
+            server: "codex_tui".into(),
+            tool: "send_message_to_thread".into(),
+            arguments: Some(json!({"threadId": thread_id, "prompt": prompt})),
+        },
+        /*animations_enabled*/ false,
+    );
+    cell.complete(
+        Duration::ZERO,
+        Ok(result(vec![json!({"type": "text", "text": "accepted"})])),
+    );
+
+    let display = cell.display_lines(/*width*/ 80);
+    insta::assert_snapshot!(
+        display.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n"),
+        @r###"
+        • Called вызов API: отправка сообщения
+          └ «Please summarize the latest status»
+        "###
+    );
+    assert!(display.iter().all(|line| !line.to_string().contains(thread_id)));
+    let raw = cell.raw_lines().iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
+    assert!(raw.contains(thread_id));
+    assert!(raw.contains(prompt));
+
+    let mut failed = new_active_mcp_tool_call(
+        "codex-tui-failed".into(),
+        McpInvocation {
+            server: "codex_tui".into(),
+            tool: "send_message_to_thread".into(),
+            arguments: Some(json!({"threadId": thread_id, "prompt": prompt})),
+        },
+        /*animations_enabled*/ false,
+    );
+    failed.complete(
+        Duration::ZERO,
+        Ok(CallToolResult {
+            is_error: Some(true),
+            ..result(vec![json!({"type": "text", "text": "permission denied"})])
+        }),
+    );
+    let narrow = failed.display_lines(/*width*/ 32);
+    assert!(narrow.iter().all(|line| line.width() <= 32));
+    let visible = narrow.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
+    assert!(visible.contains("permission denied"));
+    assert!(!visible.contains(thread_id));
+}
+
+#[test]
 fn code_mode_output_shares_a_row_budget_across_blocks() {
     let mut cell = new_active_mcp_tool_call(
         "browser-call".to_string(),
