@@ -197,6 +197,7 @@ pub enum TransportEvent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectionOrigin {
     Stdio,
+    LocalDaemonSocket,
     InProcess,
     WebSocket,
     RemoteControl,
@@ -383,6 +384,7 @@ mod tests {
                     codex_home,
                     platform_family: "unix".to_string(),
                     platform_os: "linux".to_string(),
+                    supports_hook_owner: false,
                 },
             )),
         });

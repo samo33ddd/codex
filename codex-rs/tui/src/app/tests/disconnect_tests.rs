@@ -367,6 +367,7 @@ async fn lost_initial_thread_reply_keeps_startup_draft_offline() -> Result<()> {
             app.config.clone(),
             ThreadParamsMode::Remote,
             /*remote_cwd_override*/ None,
+            /*hook_owner*/ None,
             session.thread_tool_transport(),
         )
         .await;

@@ -14,6 +14,7 @@ use codex_protocol::protocol::HookCompletedEvent;
 use codex_protocol::protocol::HookEventName;
 use codex_protocol::protocol::HookOutputEntry;
 use codex_protocol::protocol::HookOutputEntryKind;
+use codex_protocol::protocol::HookOwner;
 use codex_protocol::protocol::HookRunStatus;
 use codex_protocol::protocol::HookSource;
 use codex_protocol::shell_environment::CODEX_EXEC_SERVER_NOISE_AUTH_TOKEN_ENV_VAR;
@@ -34,6 +35,8 @@ use super::MAX_CONCURRENT_ASYNC_HOOKS;
 use super::build_command;
 use super::default_shell_program;
 use super::run_command;
+use crate::HookOwnerChangePolicy;
+use crate::HookOwnerHandle;
 use crate::events::user_prompt_submit::UserPromptSubmitRequest;
 
 #[cfg(unix)]
@@ -430,6 +433,7 @@ async fn build_command_replays_snapshot_before_hook_overrides_and_scrubbing() {
         command_line,
         &environment,
         &env,
+        None,
     );
     #[cfg(not(unix))]
     let mut command = command;
@@ -462,6 +466,210 @@ fn fallback_shell_uses_snapshot() {
         default_shell_program(&[(OsString::from(name), OsString::from(program))]),
         OsString::from(program),
     );
+}
+
+#[test]
+fn managed_hook_owner_replaces_and_clears_frozen_identity_environment() {
+    let environment = [
+        ("ORCA_PANE_KEY", "pane-old"),
+        ("ORCA_TAB_ID", "tab-old"),
+        ("ORCA_WORKTREE_ID", "worktree-old"),
+        ("ORCA_AGENT_LAUNCH_TOKEN", "launch-old"),
+        ("ORCA_AGENT_HOOK_ENDPOINT", "endpoint-old"),
+        ("ORCA_AGENT_HOOK_TOKEN", "hook-secret-old"),
+        ("CODEX_HOOK_SNAPSHOT", "captured"),
+    ]
+    .map(|(key, value)| (OsString::from(key), OsString::from(value)))
+    .to_vec();
+    let env = HashMap::from([
+        ("ORCA_PANE_KEY".to_string(), "configured-pane".to_string()),
+        ("ORCA_TAB_ID".to_string(), "configured-tab".to_string()),
+        ("CODEX_HOOK_CONFIG".to_string(), "configured".to_string()),
+    ]);
+    let owner = test_hook_owner("pane-new");
+    let command = build_command(
+        &CommandShell {
+            program: "cmd-test".to_string(),
+            args: Vec::new(),
+        },
+        "noop",
+        &environment,
+        &env,
+        Some(&owner),
+    );
+    let configured_environment = command
+        .as_std()
+        .get_envs()
+        .filter_map(|(name, value)| {
+            value.map(|value| {
+                (
+                    name.to_string_lossy().into_owned(),
+                    value.to_string_lossy().into_owned(),
+                )
+            })
+        })
+        .collect::<HashMap<_, _>>();
+
+    assert_eq!(
+        configured_environment
+            .get("ORCA_PANE_KEY")
+            .map(String::as_str),
+        Some("pane-new")
+    );
+    assert_eq!(
+        configured_environment
+            .get("ORCA_AGENT_HOOK_ENDPOINT")
+            .map(String::as_str),
+        Some(owner.hook_endpoint_path.as_str())
+    );
+    assert_eq!(
+        configured_environment
+            .get("ORCA_AGENT_LAUNCH_TOKEN")
+            .map(String::as_str),
+        Some("launch-test")
+    );
+    assert_eq!(
+        configured_environment
+            .get("CODEX_HOOK_SNAPSHOT")
+            .map(String::as_str),
+        Some("captured")
+    );
+    assert_eq!(
+        configured_environment
+            .get("CODEX_HOOK_CONFIG")
+            .map(String::as_str),
+        Some("configured")
+    );
+    for absent in ["ORCA_TAB_ID", "ORCA_WORKTREE_ID", "ORCA_AGENT_HOOK_TOKEN"] {
+        assert!(
+            !configured_environment.contains_key(absent),
+            "{absent} leaked"
+        );
+    }
+}
+
+#[tokio::test]
+async fn command_hook_captures_latest_owner_when_execution_begins() {
+    let temp = TempDir::new().expect("async test directory");
+    let handler = write_handler(
+        &temp,
+        "import json, os, sys\njson.load(sys.stdin)\nprint(os.environ.get('ORCA_PANE_KEY', 'missing'))\n",
+    );
+    let command_line = match &handler.kind {
+        ConfiguredHandlerKind::Command { command, .. } => command.clone(),
+        ConfiguredHandlerKind::McpTool { .. } => panic!("test hook must be a command"),
+    };
+    let old_owner = test_hook_owner("pane-old");
+    let new_owner = test_hook_owner("pane-new");
+    let owner_handle =
+        HookOwnerHandle::for_managed_session(old_owner).expect("valid managed owner");
+    let (result_sender, _result_receiver) = async_channel::unbounded();
+    let runtime = CommandHookRuntime::new_with_owner_handle(
+        CommandShell {
+            program: String::new(),
+            args: Vec::new(),
+        },
+        Arc::new({
+            let mut environment = std::env::vars_os().collect::<HashMap<_, _>>();
+            environment.insert(
+                OsString::from("ORCA_PANE_KEY"),
+                OsString::from("frozen-daemon-pane"),
+            );
+            environment.into_iter().collect::<Vec<_>>()
+        }),
+        ThreadId::new(),
+        result_sender,
+        owner_handle.clone(),
+    );
+    let current_directory = HashMap::new();
+    let hook = run_command(
+        &runtime,
+        &handler,
+        &command_line,
+        &current_directory,
+        "{}",
+        temp.path(),
+    );
+
+    owner_handle
+        .replace(new_owner)
+        .await
+        .expect("no hook is running before the future is polled");
+    let result = hook.await;
+
+    assert_eq!(result.exit_code, Some(0), "stderr: {}", result.stderr);
+    assert_eq!(result.stdout.trim(), "pane-new");
+}
+
+#[tokio::test]
+#[expect(
+    clippy::await_holding_invalid_type,
+    reason = "The read guard is held across refresh awaits to exercise the bounded timeout and verify the old owner is preserved."
+)]
+async fn hook_owner_handoff_is_bounded_and_keeps_old_owner_on_timeout() {
+    let old_owner = test_hook_owner("pane-old");
+    let new_owner = test_hook_owner("pane-new");
+    let handle =
+        HookOwnerHandle::for_managed_session(old_owner.clone()).expect("valid managed owner");
+    let read_guard = handle.owner.read().await;
+
+    assert_eq!(
+        handle
+            .replace_with_policy_timeout(
+                old_owner.clone(),
+                HookOwnerChangePolicy::RequireSameOwner,
+                Duration::from_millis(20),
+            )
+            .await,
+        Ok(()),
+        "same-owner reconnect should not wait for active hooks"
+    );
+    assert_eq!(
+        handle
+            .replace_with_policy_timeout(
+                new_owner.clone(),
+                HookOwnerChangePolicy::RequireSameOwner,
+                Duration::from_millis(20),
+            )
+            .await,
+        Err("hook owner is still attached to another client")
+    );
+    assert_eq!(
+        handle
+            .replace_with_timeout(new_owner.clone(), Duration::from_millis(20))
+            .await,
+        Err("hook owner handoff timed out; retry the refresh")
+    );
+    assert_eq!(read_guard.as_ref(), Some(&old_owner));
+
+    drop(read_guard);
+    assert_eq!(handle.replace(new_owner.clone()).await, Ok(()));
+    assert_eq!(handle.owner.read().await.as_ref(), Some(&new_owner));
+}
+
+fn test_hook_owner(pane_key: &str) -> HookOwner {
+    HookOwner {
+        pane_key: pane_key.to_string(),
+        tab_id: None,
+        worktree_id: None,
+        launch_token: Some("launch-test".to_string()),
+        hook_endpoint_path: if cfg!(windows) {
+            "C:\\orca\\hook-endpoint.json".to_string()
+        } else {
+            "/tmp/orca/hook-endpoint.json".to_string()
+        },
+    }
+}
+
+#[test]
+fn hook_owner_handle_identity_is_shared_only_by_clones() {
+    let owner = test_hook_owner("pane");
+    let parent = HookOwnerHandle::for_managed_session(owner.clone()).expect("valid owner");
+    let child = parent.clone();
+    let public_fork = HookOwnerHandle::for_managed_session(owner).expect("valid owner");
+
+    assert!(parent.is_same_handle(&child));
+    assert!(!parent.is_same_handle(&public_fork));
 }
 
 const ASYNC_HOOK_TEST_TIMEOUT: Duration = Duration::from_secs(30);

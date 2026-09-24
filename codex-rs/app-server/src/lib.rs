@@ -954,6 +954,7 @@ pub async fn run_main_with_transport_options(
         let initialize_notification_sender = outgoing_message_sender.clone();
         let outbound_control_tx = outbound_control_tx;
         let processor = Arc::new(MessageProcessor::new(MessageProcessorArgs {
+            supports_hook_owner: managed_daemon,
             outgoing: outgoing_message_sender,
             analytics_events_client,
             arg0_paths,

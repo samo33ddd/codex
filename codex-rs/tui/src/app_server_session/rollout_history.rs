@@ -152,6 +152,7 @@ impl AppServerSession {
             self.thread_params_mode(),
             self.remote_cwd_override.as_deref(),
             model_settings,
+            self.hook_owner_for_request()?,
         );
         self.thread_tool_transport()
             .configure_mcp(&mut params.config);

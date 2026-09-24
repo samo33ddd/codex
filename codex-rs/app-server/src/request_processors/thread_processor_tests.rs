@@ -95,6 +95,85 @@ mod background_terminal_pagination_tests {
     }
 }
 
+mod hook_owner_resume_policy_tests {
+    use super::super::hook_owner_resume::change_policy;
+    use crate::outgoing_message::ConnectionId;
+    use crate::thread_state::ConnectionCapabilities;
+    use crate::thread_state::ThreadStateManager;
+    use codex_hooks::HookOwnerChangePolicy;
+    use codex_protocol::ThreadId;
+
+    #[test]
+    fn allows_owner_change_when_requester_is_the_only_live_connection() {
+        assert_eq!(
+            change_policy(&[ConnectionId(1)], ConnectionId(1)),
+            HookOwnerChangePolicy::AllowDifferentOwner
+        );
+        assert_eq!(
+            change_policy(&[], ConnectionId(1)),
+            HookOwnerChangePolicy::AllowDifferentOwner
+        );
+    }
+
+    #[test]
+    fn keeps_owner_when_another_live_connection_remains() {
+        assert_eq!(
+            change_policy(&[ConnectionId(1), ConnectionId(2)], ConnectionId(1)),
+            HookOwnerChangePolicy::RequireSameOwner
+        );
+        assert_eq!(
+            change_policy(&[ConnectionId(2)], ConnectionId(1)),
+            HookOwnerChangePolicy::RequireSameOwner
+        );
+    }
+
+    #[tokio::test]
+    async fn parent_subscription_blocks_child_owner_change_but_not_public_fork() {
+        let state_manager = ThreadStateManager::new();
+        let parent_thread_id = ThreadId::new();
+        let child_thread_id = ThreadId::new();
+        let public_fork_thread_id = ThreadId::new();
+        let connection_a = ConnectionId(1);
+        let connection_b = ConnectionId(2);
+        for connection_id in [connection_a, connection_b] {
+            state_manager
+                .connection_initialized(connection_id, ConnectionCapabilities::default())
+                .await;
+        }
+        state_manager
+            .try_ensure_connection_subscribed(
+                parent_thread_id,
+                connection_a,
+                /*experimental_raw_events*/ false,
+            )
+            .await
+            .expect("parent should subscribe");
+
+        let mut family_subscriptions = state_manager
+            .subscribed_connection_ids(parent_thread_id)
+            .await;
+        family_subscriptions.extend(
+            state_manager
+                .subscribed_connection_ids(child_thread_id)
+                .await,
+        );
+        assert_eq!(family_subscriptions, vec![connection_a]);
+        assert_eq!(
+            change_policy(&family_subscriptions, connection_b),
+            HookOwnerChangePolicy::RequireSameOwner
+        );
+
+        let public_fork_subscriptions = state_manager
+            .subscribed_connection_ids(public_fork_thread_id)
+            .await;
+        assert!(public_fork_subscriptions.is_empty());
+        assert_eq!(
+            change_policy(&public_fork_subscriptions, connection_b),
+            HookOwnerChangePolicy::AllowDifferentOwner
+        );
+    }
+}
+
 mod thread_processor_behavior_tests {
     async fn forked_from_id_from_rollout(path: &Path) -> Option<String> {
         codex_core::read_session_meta_line(path)
@@ -677,6 +756,7 @@ mod thread_processor_behavior_tests {
             base_instructions: None,
             developer_instructions: None,
             personality: None,
+            hook_owner: None,
             exclude_turns: false,
             initial_turns_page: None,
         };

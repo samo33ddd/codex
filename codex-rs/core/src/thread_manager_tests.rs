@@ -361,6 +361,7 @@ async fn thread_id_generator_applies_to_roots_children_and_forks() {
         ThreadId::from_u128(/*value*/ 0x018f_0000_0000_7000_8000_0000_0000_0001),
         ThreadId::from_u128(/*value*/ 0x018f_0000_0000_7000_8000_0000_0000_0002),
         ThreadId::from_u128(/*value*/ 0x018f_0000_0000_7000_8000_0000_0000_0003),
+        ThreadId::from_u128(/*value*/ 0x018f_0000_0000_7000_8000_0000_0000_0004),
     ];
     let next_id = std::sync::atomic::AtomicUsize::new(0);
     let manager = ThreadManager::with_models_provider_and_home_for_tests(
@@ -401,19 +402,48 @@ async fn thread_id_generator_applies_to_roots_children_and_forks() {
         .await
         .expect("spawn actual child agent");
     let fork = manager
-        .spawn_subagent(root.thread_id, StartThreadOptions::new(config))
+        .spawn_subagent(root.thread_id, StartThreadOptions::new(config.clone()))
         .await
         .expect("fork root thread");
+    root.thread.ensure_rollout_materialized().await;
+    root.thread
+        .flush_rollout()
+        .await
+        .expect("flush source rollout");
+    let public_fork = manager
+        .fork_thread(
+            ForkSnapshot::Interrupted,
+            StartThreadOptions::new(config),
+            root.thread
+                .rollout_path()
+                .expect("source rollout path should exist"),
+        )
+        .await
+        .expect("fork public thread");
 
     assert_eq!(
-        [root.thread_id, child.thread_id, fork.thread_id],
+        [
+            root.thread_id,
+            child.thread_id,
+            fork.thread_id,
+            public_fork.thread_id
+        ],
         generated_ids
     );
+    let family_thread_ids = manager
+        .list_thread_ids_with_same_hook_owner(root.thread_id)
+        .await
+        .expect("list loaded hook owner family");
+    assert_eq!(family_thread_ids.len(), 3);
+    for family_thread_id in [root.thread_id, child.thread_id, fork.thread_id] {
+        assert!(family_thread_ids.contains(&family_thread_id));
+    }
+    assert!(!family_thread_ids.contains(&public_fork.thread_id));
 
     let report = manager
         .shutdown_all_threads_bounded(Duration::from_secs(10))
         .await;
-    assert_eq!(report.completed.len(), 3);
+    assert_eq!(report.completed.len(), 4);
 }
 
 /// Resuming a thread preserves its stored ID instead of invoking the new manager's factory.
@@ -1510,6 +1540,7 @@ async fn spawn_internal_session_preserves_parent_lineage_without_forking_history
                 },
                 originator: reviewer_config.originator.clone(),
                 inherited_instructions: None,
+                hook_owner_handle: parent.thread.session.hook_owner_handle(),
             }),
             session_source: Some(SessionSource::Internal(
                 InternalSessionSource::MemoryConsolidation,

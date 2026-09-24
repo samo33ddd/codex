@@ -181,6 +181,7 @@ async fn embedded_lifecycle_requests_preserve_explicit_workspace_roots() -> Resu
         ThreadParamsMode::Embedded,
         /*remote_cwd_override*/ None,
         /*session_start_source*/ None,
+        /*hook_owner*/ None,
     );
     let resume = thread_resume_params_from_config(
         config.clone(),
@@ -188,12 +189,14 @@ async fn embedded_lifecycle_requests_preserve_explicit_workspace_roots() -> Resu
         ThreadParamsMode::Embedded,
         /*remote_cwd_override*/ None,
         ResumeModelSettings::RestoreFromThread,
+        /*hook_owner*/ None,
     );
     let fork = thread_fork_params_from_config(
         config,
         thread_id,
         ThreadParamsMode::Embedded,
         /*remote_cwd_override*/ None,
+        /*hook_owner*/ None,
     );
     assert_eq!(
         [

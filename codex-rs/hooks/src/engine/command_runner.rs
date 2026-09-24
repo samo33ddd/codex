@@ -40,11 +40,13 @@ use super::dispatcher::hook_source_label;
 use super::dispatcher::scope_for_event;
 use crate::output_spill::AdditionalContext;
 use crate::output_spill::HookOutputSpiller;
+use crate::registry::HookOwnerHandle;
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::HookCompletedEvent;
 use codex_protocol::protocol::HookHandlerType;
 use codex_protocol::protocol::HookOutputEntry;
 use codex_protocol::protocol::HookOutputEntryKind;
+use codex_protocol::protocol::HookOwner;
 
 const MAX_CONCURRENT_ASYNC_HOOKS: usize = 8;
 
@@ -53,6 +55,7 @@ const MAX_CONCURRENT_ASYNC_HOOKS: usize = 8;
 pub(crate) struct CommandHookRuntime {
     shell: CommandShell,
     environment: Arc<Vec<(OsString, OsString)>>,
+    hook_owner_handle: HookOwnerHandle,
     result_sender: Sender<HookCompletedEvent>,
     state: Arc<Mutex<CommandHookRuntimeState>>,
     output_spiller: HookOutputSpiller,
@@ -79,9 +82,26 @@ impl CommandHookRuntime {
         thread_id: ThreadId,
         result_sender: Sender<HookCompletedEvent>,
     ) -> Self {
+        Self::new_with_owner_handle(
+            shell,
+            environment,
+            thread_id,
+            result_sender,
+            HookOwnerHandle::default(),
+        )
+    }
+
+    pub(crate) fn new_with_owner_handle(
+        shell: CommandShell,
+        environment: Arc<Vec<(OsString, OsString)>>,
+        thread_id: ThreadId,
+        result_sender: Sender<HookCompletedEvent>,
+        hook_owner_handle: HookOwnerHandle,
+    ) -> Self {
         Self {
             shell,
             environment,
+            hook_owner_handle,
             result_sender,
             state: Arc::new(Mutex::new(CommandHookRuntimeState::default())),
             output_spiller: HookOutputSpiller::new(thread_id),
@@ -98,6 +118,7 @@ impl CommandHookRuntime {
         Self {
             shell,
             environment: Arc::clone(&self.environment),
+            hook_owner_handle: self.hook_owner_handle.clone(),
             result_sender: self.result_sender.clone(),
             state: Arc::clone(&self.state),
             output_spiller: self.output_spiller.clone(),
@@ -191,6 +212,10 @@ impl CommandHookRuntime {
     }
 }
 
+#[expect(
+    clippy::await_holding_invalid_type,
+    reason = "The owner read guard intentionally spans hook awaits so the bounded owner handoff cannot overlap a running hook."
+)]
 #[tracing::instrument(
     name = "codex.hooks.command",
     level = "trace",
@@ -217,7 +242,15 @@ pub(crate) async fn run_command(
     let started_at = chrono::Utc::now().timestamp();
     let started = Instant::now();
 
-    let mut command = build_command(&runtime.shell, command_line, &runtime.environment, env);
+    // Keep the read guard until the process exits so an owner refresh cannot overlap a hook.
+    let hook_owner = runtime.hook_owner_handle.owner.read().await;
+    let mut command = build_command(
+        &runtime.shell,
+        command_line,
+        &runtime.environment,
+        env,
+        hook_owner.as_ref(),
+    );
     command.current_dir(cwd);
 
     #[cfg(windows)]
@@ -389,6 +422,7 @@ fn build_command(
     command_line: &str,
     environment: &[(OsString, OsString)],
     env: &HashMap<String, String>,
+    hook_owner: Option<&HookOwner>,
 ) -> Command {
     let mut command = if shell.program.is_empty() {
         Command::new(default_shell_program(environment))
@@ -423,18 +457,69 @@ fn build_command(
         .kill_on_drop(true);
 
     // Both launchers start with an empty environment. Replay the session snapshot
-    // before hook overrides, filtering restricted names from both sources.
-    command.envs(
-        environment
-            .iter()
-            .map(|(key, value)| (key.as_os_str(), value.as_os_str()))
-            .chain(
-                env.iter()
-                    .map(|(key, value)| (OsStr::new(key), OsStr::new(value))),
-            )
-            .filter(|(key, _)| !key.to_str().is_some_and(is_non_inheritable_env_var)),
-    );
+    // before hook overrides, filtering restricted names from both sources. A managed
+    // owner replaces frozen daemon identity values and the daemon-only hook auth token.
+    let owner_managed = hook_owner.is_some();
+    let mut child_environment = environment
+        .iter()
+        .filter(|(key, _)| !owner_managed || !is_hook_owner_environment_key(key))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .chain(env.iter().filter_map(|(key, value)| {
+            (!owner_managed || !is_hook_owner_environment_key(OsStr::new(key)))
+                .then_some((OsString::from(key), OsString::from(value)))
+        }))
+        .filter(|(key, _)| !key.to_str().is_some_and(is_non_inheritable_env_var))
+        .collect::<Vec<_>>();
+    if let Some(owner) = hook_owner {
+        child_environment.push((
+            OsString::from("ORCA_PANE_KEY"),
+            OsString::from(&owner.pane_key),
+        ));
+        if let Some(tab_id) = owner.tab_id.as_deref() {
+            child_environment.push((OsString::from("ORCA_TAB_ID"), OsString::from(tab_id)));
+        }
+        if let Some(worktree_id) = owner.worktree_id.as_deref() {
+            child_environment.push((
+                OsString::from("ORCA_WORKTREE_ID"),
+                OsString::from(worktree_id),
+            ));
+        }
+        if let Some(launch_token) = owner.launch_token.as_deref() {
+            child_environment.push((
+                OsString::from("ORCA_AGENT_LAUNCH_TOKEN"),
+                OsString::from(launch_token),
+            ));
+        }
+        child_environment.push((
+            OsString::from("ORCA_AGENT_HOOK_ENDPOINT"),
+            OsString::from(&owner.hook_endpoint_path),
+        ));
+    }
+    command.envs(child_environment);
     command
+}
+
+fn is_hook_owner_environment_key(key: &OsStr) -> bool {
+    const OWNER_ENVIRONMENT_KEYS: [&str; 6] = [
+        "ORCA_PANE_KEY",
+        "ORCA_TAB_ID",
+        "ORCA_WORKTREE_ID",
+        "ORCA_AGENT_LAUNCH_TOKEN",
+        "ORCA_AGENT_HOOK_ENDPOINT",
+        "ORCA_AGENT_HOOK_TOKEN",
+    ];
+    key.to_str().is_some_and(|key| {
+        OWNER_ENVIRONMENT_KEYS.iter().any(|name| {
+            #[cfg(windows)]
+            {
+                key.eq_ignore_ascii_case(name)
+            }
+            #[cfg(not(windows))]
+            {
+                key == *name
+            }
+        })
+    })
 }
 
 fn default_shell_program(environment: &[(OsString, OsString)]) -> OsString {

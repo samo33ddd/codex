@@ -32,11 +32,22 @@ use codex_config::ConfigLayerStack;
 use codex_plugin::ExecutorPluginHookSource;
 use codex_plugin::PluginHookSource;
 use codex_protocol::ThreadId;
+use codex_protocol::protocol::HookOwner;
 use codex_protocol::shell_environment::scrub_non_inheritable_env_vars;
 use std::ffi::OsString;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::process::Command;
+use tokio::sync::RwLock;
+use tokio::time::timeout;
+
+const HOOK_OWNER_HANDOFF_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HookOwnerChangePolicy {
+    AllowDifferentOwner,
+    RequireSameOwner,
+}
 
 #[derive(Default, Clone)]
 pub struct HooksConfig {
@@ -50,6 +61,92 @@ pub struct HooksConfig {
     pub shell_args: Vec<String>,
 }
 
+/// Shares one local-daemon hook identity across a root thread and its children.
+#[derive(Clone, Default)]
+pub struct HookOwnerHandle {
+    pub(crate) owner: Arc<RwLock<Option<HookOwner>>>,
+    managed: bool,
+}
+
+impl HookOwnerHandle {
+    /// Create a handle for a thread family owned by one local daemon client.
+    pub fn for_managed_session(owner: HookOwner) -> Result<Self, &'static str> {
+        owner.validate()?;
+        Ok(Self {
+            owner: Arc::new(RwLock::new(Some(owner))),
+            managed: true,
+        })
+    }
+
+    pub fn is_same_handle(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.owner, &other.owner)
+    }
+
+    pub fn is_managed(&self) -> bool {
+        self.managed
+    }
+
+    /// Replace the identity after active hooks drain; on timeout, the old identity remains.
+    pub async fn replace(&self, owner: HookOwner) -> Result<(), &'static str> {
+        self.replace_with_policy(owner, HookOwnerChangePolicy::AllowDifferentOwner)
+            .await
+    }
+
+    /// Refresh ownership, optionally rejecting a different live owner.
+    pub async fn replace_with_policy(
+        &self,
+        owner: HookOwner,
+        policy: HookOwnerChangePolicy,
+    ) -> Result<(), &'static str> {
+        self.replace_with_policy_timeout(owner, policy, HOOK_OWNER_HANDOFF_TIMEOUT)
+            .await
+    }
+
+    pub(crate) async fn replace_with_timeout(
+        &self,
+        owner: HookOwner,
+        handoff_timeout: Duration,
+    ) -> Result<(), &'static str> {
+        self.replace_with_policy_timeout(
+            owner,
+            HookOwnerChangePolicy::AllowDifferentOwner,
+            handoff_timeout,
+        )
+        .await
+    }
+
+    pub(crate) async fn replace_with_policy_timeout(
+        &self,
+        owner: HookOwner,
+        policy: HookOwnerChangePolicy,
+        handoff_timeout: Duration,
+    ) -> Result<(), &'static str> {
+        if !self.managed {
+            return Err("hook ownership is not enabled for this session");
+        }
+        owner.validate()?;
+        if let Ok(current) = self.owner.try_read() {
+            if current.as_ref() == Some(&owner) {
+                return Ok(());
+            }
+            if policy == HookOwnerChangePolicy::RequireSameOwner {
+                return Err("hook owner is still attached to another client");
+            }
+        }
+        let mut current = timeout(handoff_timeout, self.owner.write())
+            .await
+            .map_err(|_| "hook owner handoff timed out; retry the refresh")?;
+        if current.as_ref() == Some(&owner) {
+            return Ok(());
+        }
+        if policy == HookOwnerChangePolicy::RequireSameOwner {
+            return Err("hook owner is still attached to another client");
+        }
+        *current = Some(owner);
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HookListOutcome {
     pub hooks: Vec<HookListEntry>,
@@ -61,6 +158,7 @@ pub struct Hooks {
     // TODO: Once legacy `notify` is removed, capture this snapshot in `CommandHookRuntime::new`
     // and remove the environment plumbing from `Hooks` and `from_config`.
     environment: Arc<Vec<(OsString, OsString)>>,
+    hook_owner_handle: HookOwnerHandle,
     after_agent: Vec<Hook>,
     engine: ClaudeHooksEngine,
     plugin_hook_sources: Vec<PluginHookSource>,
@@ -75,11 +173,34 @@ impl Hooks {
         thread_id: ThreadId,
         mcp_executor: Arc<dyn HookMcpExecutor>,
     ) -> anyhow::Result<(Self, Receiver<codex_protocol::protocol::HookCompletedEvent>)> {
+        Self::new_with_owner_handle(config, thread_id, mcp_executor, HookOwnerHandle::default())
+    }
+
+    /// Bind hooks to an owner handle before the session emits any hook events.
+    pub fn new_with_owner_handle(
+        config: HooksConfig,
+        thread_id: ThreadId,
+        mcp_executor: Arc<dyn HookMcpExecutor>,
+        hook_owner_handle: HookOwnerHandle,
+    ) -> anyhow::Result<(Self, Receiver<codex_protocol::protocol::HookCompletedEvent>)> {
         let (result_sender, result_receiver) = async_channel::unbounded();
         let environment = Arc::new(std::env::vars_os().collect());
-        let hooks = Self::from_config(config, mcp_executor, Arc::clone(&environment), |shell| {
-            CommandHookRuntime::new(shell, environment, thread_id, result_sender)
-        });
+        let runtime_owner_handle = hook_owner_handle.clone();
+        let hooks = Self::from_config(
+            config,
+            mcp_executor,
+            Arc::clone(&environment),
+            hook_owner_handle,
+            |shell| {
+                CommandHookRuntime::new_with_owner_handle(
+                    shell,
+                    environment,
+                    thread_id,
+                    result_sender,
+                    runtime_owner_handle,
+                )
+            },
+        );
         let required_load_errors = hooks.engine.required_load_errors();
         if !required_load_errors.is_empty() {
             anyhow::bail!(
@@ -96,8 +217,13 @@ impl Hooks {
             config,
             Arc::clone(&self.engine.mcp_executor),
             Arc::clone(&self.environment),
+            self.hook_owner_handle.clone(),
             |shell| self.engine.command_runtime.reconfigured(shell),
         )
+    }
+
+    pub fn hook_owner_handle(&self) -> HookOwnerHandle {
+        self.hook_owner_handle.clone()
     }
 
     pub fn matches_plugin_hooks<'a>(
@@ -119,14 +245,21 @@ impl Hooks {
         config: HooksConfig,
         mcp_executor: Arc<dyn HookMcpExecutor>,
         environment: Arc<Vec<(OsString, OsString)>>,
+        hook_owner_handle: HookOwnerHandle,
         build_runtime: impl FnOnce(CommandShell) -> CommandHookRuntime,
     ) -> Self {
-        let after_agent = config
-            .legacy_notify_argv
-            .filter(|argv| !argv.is_empty() && !argv[0].is_empty())
-            .map(|argv| crate::legacy_notify::notify_hook(argv, Arc::clone(&environment)))
-            .into_iter()
-            .collect();
+        let after_agent = if hook_owner_handle.is_managed() {
+            // Legacy notify snapshots process env and does not track child completion, so it
+            // cannot safely participate in an owner handoff.
+            Vec::new()
+        } else {
+            config
+                .legacy_notify_argv
+                .filter(|argv| !argv.is_empty() && !argv[0].is_empty())
+                .map(|argv| crate::legacy_notify::notify_hook(argv, Arc::clone(&environment)))
+                .into_iter()
+                .collect()
+        };
         let command_runtime = build_runtime(CommandShell {
             program: config.shell_program.unwrap_or_default(),
             args: config.shell_args,
@@ -142,6 +275,7 @@ impl Hooks {
         );
         Self {
             environment,
+            hook_owner_handle,
             after_agent,
             engine,
             plugin_hook_sources: config.plugin_hook_sources,

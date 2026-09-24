@@ -3435,6 +3435,11 @@
           "description": "Operating system for the running app-server target, for example `\"macos\"`, `\"linux\"`, or `\"windows\"`.",
           "type": "string"
         },
+        "supportsHookOwner": {
+          "default": false,
+          "description": "True only when this process accepts transient hook ownership on its local daemon socket.",
+          "type": "boolean"
+        },
         "userAgent": {
           "type": "string"
         }
@@ -13411,6 +13416,41 @@
           "error"
         ],
         "type": "string"
+      },
+      "HookOwner": {
+        "additionalProperties": false,
+        "description": "The fixed Orca pane identity that may be sent over authenticated local daemon IPC.",
+        "properties": {
+          "hookEndpointPath": {
+            "type": "string"
+          },
+          "launchToken": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "paneKey": {
+            "type": "string"
+          },
+          "tabId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "worktreeId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "hookEndpointPath",
+          "paneKey"
+        ],
+        "type": "object"
       },
       "HookPromptFragment": {
         "properties": {
