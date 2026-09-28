@@ -1,13 +1,13 @@
 {
   "schemaVersion": 1,
   "upstreamRepository": "openai/codex",
-  "upstreamTag": "rust-v0.155.0-alpha.2.6",
-  "upstreamCommit": "bf6f0a4ec97919bf697cdc532e7b8af4ec482fc6",
-  "backendVersion": "0.155.0-alpha.2.6",
+  "upstreamTag": "rust-v0.158.0-alpha.8",
+  "upstreamCommit": "e4b68615f06621c43b365d66823ed01b8f8e8416",
+  "backendVersion": "0.158.0-alpha.8",
   "desktopVersions": ["26.911.7940.0"],
   "target": "x86_64-pc-windows-msvc",
   "codeModeHost": {
-    "url": "https://github.com/openai/codex/releases/download/rust-v0.155.0-alpha.2.6/codex-code-mode-host-x86_64-pc-windows-msvc.exe",
-    "sha256": "5efe00b4aa7a7422b2b94309c9b3089953fb1586d7085535296b032f9fca1704"
+    "url": "https://github.com/openai/codex/releases/download/rust-v0.158.0-alpha.8/codex-code-mode-host-x86_64-pc-windows-msvc.exe",
+    "sha256": "d4b934d6a4b4bbfc4191da97eb2d5b313098542ddca06d62c9f41fc1ca0dbb38"
   }
 }

@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::async_scorer::authorization::ScoreAuthorization;
+use codex_protocol::models::ImageReference;
 use pretty_assertions::assert_eq;
 
 #[derive(Clone, Copy)]
@@ -139,7 +140,7 @@ async fn assert_catalog_budget(evidence: BudgetEvidence) -> Result<()> {
                     unreachable!("user instruction is a message");
                 };
                 content.push(ContentItem::InputImage {
-                    image_url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGPgEpEDAABoAD1UCKP3AAAAAElFTkSuQmCC".to_owned(),
+                    image: ImageReference::Inline { image_url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGPgEpEDAABoAD1UCKP3AAAAAElFTkSuQmCC".to_owned() },
                     detail: None,
                 });
                 (None, vec!["optional old commentary ".repeat(/*n*/ 500)])
@@ -174,6 +175,7 @@ async fn assert_catalog_budget(evidence: BudgetEvidence) -> Result<()> {
             .await?;
         let history: Arc<dyn ConversationHistorySnapshot> = match evidence {
             BudgetEvidence::Checkpoint => Arc::new(TestRetainedHistory {
+                retained_context: None,
                 retained: history.clone(),
                 current: TestConversationHistory(history),
                 compaction_model_hash: Some("budget-checkpoint".to_owned()),
@@ -184,15 +186,18 @@ async fn assert_catalog_budget(evidence: BudgetEvidence) -> Result<()> {
         };
         let thread_store = fixture.test.codex.thread_extension_data();
         if matches!(evidence, BudgetEvidence::UserInstructions) {
-            thread_store.insert(SecurityRiskScore {
-                scores: BTreeMap::from([("action_risk".to_owned(), 0.25)]),
-                call_id: None,
-                action: None,
-                sampled_at: None,
-            });
+            set_cached_score(
+                thread_store,
+                SecurityRiskScore {
+                    scores: BTreeMap::from([("action_risk".to_owned(), 0.25)]),
+                    call_id: None,
+                    action: None,
+                    sampled_at: None,
+                },
+            );
             let progress = thread_store.get::<GuardianV2ScoreProgress>().unwrap();
             let authorization = ScoreAuthorization::current(&fixture.test.codex).await;
-            *progress.authorization.lock().unwrap() = Some(authorization);
+            seed_cached_score(&progress, thread_store, /*index*/ 0, authorization);
             assert_eq!(
                 cached_approval(
                     &fixture.registry,
@@ -226,7 +231,13 @@ async fn assert_catalog_budget(evidence: BudgetEvidence) -> Result<()> {
             })
             .await;
         if matches!(outcome, BudgetOutcome::RequiresSync) {
-            fixture.assert_fails_closed("elevated_risk").await?;
+            let reason = if matches!(evidence, BudgetEvidence::Checkpoint) {
+                // Raw injection supplies no live checkpoint provenance, regardless of the sample.
+                "incompatible_compaction"
+            } else {
+                "elevated_risk"
+            };
+            fixture.assert_fails_closed(reason).await?;
             assert!(
                 server
                     .received_requests()
@@ -240,9 +251,7 @@ async fn assert_catalog_budget(evidence: BudgetEvidence) -> Result<()> {
         }
         let progress = thread_store.get::<GuardianV2ScoreProgress>().unwrap();
         tokio::time::timeout(ASYNC_TEST_TIMEOUT, async {
-            while progress.latest_scored_tool_call.load(Ordering::Acquire)
-                < progress.latest_tool_call.load(Ordering::Acquire)
-            {
+            while progress.inspect(/*call_id*/ None).lag > 0 {
                 tokio::task::yield_now().await;
             }
         })
@@ -272,7 +281,12 @@ async fn assert_catalog_budget(evidence: BudgetEvidence) -> Result<()> {
                 /*metrics*/ None
             )
             .await,
-            Some(ReviewDecision::Approved)
+            if matches!(evidence, BudgetEvidence::Checkpoint) {
+                // A valid sampled snapshot cannot make an unannotated live checkpoint safe.
+                None
+            } else {
+                Some(ReviewDecision::Approved)
+            }
         );
         fixture.test.codex.shutdown_and_wait().await?;
     }

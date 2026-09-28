@@ -17,14 +17,15 @@ use crate::spawn_pty_process;
 #[path = "windows_tests.rs"]
 mod windows_tests;
 
-fn find_python() -> Option<String> {
+pub(super) fn find_python() -> Option<String> {
     for candidate in ["python3", "python"] {
         if let Ok(output) = std::process::Command::new(candidate)
-            .arg("--version")
+            .args(["-c", "import sys; print(sys.executable)"])
+            .env("PYTHONIOENCODING", "utf-8")
             .output()
             && output.status.success()
         {
-            return Some(candidate.to_string());
+            return Some(String::from_utf8(output.stdout).ok()?.trim().to_owned());
         }
     }
     None

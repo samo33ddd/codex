@@ -17,4 +17,8 @@ platformFamily: string,
  * Operating system for the running app-server target, for example
  * `"macos"`, `"linux"`, or `"windows"`.
  */
-platformOs: string, };
+platformOs: string,
+/**
+ * True only when this process accepts transient hook ownership on its local daemon socket.
+ */
+supportsHookOwner: boolean, };

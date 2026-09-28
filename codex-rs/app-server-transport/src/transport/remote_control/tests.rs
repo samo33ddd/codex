@@ -1889,6 +1889,7 @@ async fn remote_control_http_mode_enrolls_before_connecting() {
                             codex_home: codex_home.path().abs(),
                             platform_family: "test-family".to_string(),
                             platform_os: "test-os".to_string(),
+                            supports_hook_owner: false,
                         },
                     ),
                 ),
@@ -1909,6 +1910,7 @@ async fn remote_control_http_mode_enrolls_before_connecting() {
                     "codexHome": codex_home.path(),
                     "platformFamily": "test-family",
                     "platformOs": "test-os",
+                    "supportsHookOwner": false,
                 }
             }
         })

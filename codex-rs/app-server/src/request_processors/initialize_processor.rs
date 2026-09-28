@@ -14,34 +14,43 @@ use codex_protocol::mcp::OPENAI_ELICITATION_EXTENSION_ID;
 use super::*;
 use crate::message_processor::ConnectionSessionState;
 use crate::message_processor::InitializedConnectionSessionState;
+use crate::transport::ConnectionOrigin;
 
 const NON_ORIGINATING_CLIENT_NAMES: &[&str] = &["codex_app_server_daemon", "codex-backend"];
 
 #[derive(Clone)]
 pub(crate) struct InitializeRequestProcessor {
+    gateway_login_control: Arc<codex_login::GatewayLoginControl>,
+    gateway_login_initialized: Arc<std::sync::OnceLock<()>>,
     outgoing: Arc<OutgoingMessageSender>,
     analytics_events_client: AnalyticsEventsClient,
     config: Arc<Config>,
     config_warnings: Arc<Vec<ConfigWarningNotification>>,
     rpc_transport: AppServerRpcTransport,
+    supports_hook_owner: bool,
     user_verification: Arc<crate::user_verification::Service>,
 }
 
 impl InitializeRequestProcessor {
     pub(crate) fn new(
+        gateway_login_control: Arc<codex_login::GatewayLoginControl>,
         outgoing: Arc<OutgoingMessageSender>,
         analytics_events_client: AnalyticsEventsClient,
         config: Arc<Config>,
         config_warnings: Vec<ConfigWarningNotification>,
         rpc_transport: AppServerRpcTransport,
+        supports_hook_owner: bool,
         user_verification: Arc<crate::user_verification::Service>,
     ) -> Self {
         Self {
+            gateway_login_control,
+            gateway_login_initialized: Arc::new(std::sync::OnceLock::new()),
             outgoing,
             analytics_events_client,
             config,
             config_warnings: Arc::new(config_warnings),
             rpc_transport,
+            supports_hook_owner,
             user_verification,
         }
     }
@@ -95,14 +104,14 @@ impl InitializeRequestProcessor {
                 "Invalid clientInfo.name: '{name}'. Must be a valid HTTP header value."
             )));
         }
-        // The bundled TUI shares this build and implements the typed verification UI.
-        // Independently deployed UIs need their own rollout before receiving this mode.
+        // Activate only the embedded TUI and local desktop host. Client-supplied
+        // extensions cannot opt other hosts into verification.
         let user_verification_enabled = experimental_api_enabled
             && matches!(
-                session.origin,
-                crate::transport::ConnectionOrigin::InProcess
+                (session.origin, name.as_str()),
+                (ConnectionOrigin::InProcess, "codex-tui")
+                    | (ConnectionOrigin::Stdio, "Codex Desktop")
             )
-            && name == "codex-tui"
             && tokio::task::spawn_blocking(self.user_verification.device_supported)
                 .await
                 .unwrap_or(false);
@@ -143,6 +152,19 @@ impl InitializeRequestProcessor {
                 .await;
         }
 
+        if capabilities.explicit_gateway_oauth || mutates_global_identity {
+            // Only the first originating client may restore legacy automatic login.
+            // Any explicit opt-in is sticky across subsequent connections.
+            self.gateway_login_initialized.get_or_init(|| {
+                if !capabilities.explicit_gateway_oauth {
+                    self.gateway_login_control.allow_automatic_login();
+                }
+            });
+            if capabilities.explicit_gateway_oauth {
+                self.gateway_login_control.require_explicit_login();
+            }
+        }
+
         if mutates_global_identity {
             // Only real client initialization may mutate process-global client metadata.
             if let Err(error) = set_default_originator(originator.clone()) {
@@ -173,12 +195,29 @@ impl InitializeRequestProcessor {
             *suffix = Some(user_agent_suffix);
         }
 
+        #[cfg(windows)]
+        if matches!(session.origin, ConnectionOrigin::Stdio) && name == "Codex Desktop" {
+            // Uninstall ownership must not depend on account sign-in or sandbox setup.
+            // Keep this bounded attempt ahead of the response; background registration can race uninstall.
+            let home = codex_home.clone();
+            if !matches!(
+                tokio::task::spawn_blocking(move || {
+                    codex_windows_sandbox::register_desktop_installation(&home)
+                })
+                .await,
+                Ok(Ok(()))
+            ) {
+                tracing::warn!("could not register desktop uninstall ownership");
+            }
+        }
+
         let user_agent = get_codex_user_agent();
         let response = InitializeResponse {
             user_agent,
             codex_home,
             platform_family: std::env::consts::FAMILY.to_string(),
             platform_os: std::env::consts::OS.to_string(),
+            supports_hook_owner: self.supports_hook_owner,
         };
 
         self.outgoing

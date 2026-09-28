@@ -23,6 +23,11 @@
       "description": "Operating system for the running app-server target, for example `\"macos\"`, `\"linux\"`, or `\"windows\"`.",
       "type": "string"
     },
+    "supportsHookOwner": {
+      "default": false,
+      "description": "True only when this process accepts transient hook ownership on its local daemon socket.",
+      "type": "boolean"
+    },
     "userAgent": {
       "type": "string"
     }

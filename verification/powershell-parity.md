@@ -2,6 +2,16 @@
 
 Source baseline: `rust-v0.155.0-alpha.2.6`, commit `bf6f0a4ec97919bf697cdc532e7b8af4ec482fc6`. Desktop baseline: `26.911.7940.0`, Windows x64 / PowerShell 7.
 
+## Combined branch verification (2026-09-28)
+
+Merged `codex/custom-alpha` at `59b77cb47c` into `powershell-action-parity` at `b1086c87ea`, targeting `0.158.0-alpha.8`. Resolved release-branch conflicts using the newer alpha Windows sandbox and packaging code; preserved the PowerShell parser, skill detection, desktop launcher and Git labels. Updated the packaging manifest to the matching official code-mode host and GitHub release SHA-256.
+
+- `just test -p codex-shell-command -p codex-skills -p codex-app-server-protocol -p codex-app-server-daemon`: 587 passed, 1 skipped. The Windows `daemon_default_children_do_not_open_console_windows` regression passed.
+- PowerShell delivery Python tests: 5 passed. Desktop Git-label checks, launcher fixture scenarios and the custom-alpha updater self-check passed.
+- `just test -p codex-tui --lib -E 'test(exec_cell::render::tests::powershell_skill_read_snapshot)'`: 1 passed; the remaining TUI tests were excluded by the filter.
+- `just fmt` completed successfully. Kept the Rust module ordering fix; excluded unrelated alpha-updater reformatting, Windows CRLF rewrites inside Bazel strings, and Cargo's workspace-version lockfile normalization from the merge.
+- This source merge does not replace the installed backend or establish desktop visual acceptance. The earlier evidence below remains tied to its recorded baseline.
+
 ## Coverage
 
 | Operation | Bash/Zsh comparison | Supported PowerShell equivalent |

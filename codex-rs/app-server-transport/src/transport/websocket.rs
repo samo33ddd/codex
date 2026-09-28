@@ -1,9 +1,6 @@
 use super::CHANNEL_CAPACITY;
 use super::ConnectionOrigin;
 use super::TransportEvent;
-use super::auth::WebsocketAuthPolicy;
-use super::auth::authorize_upgrade;
-use super::auth::is_unauthenticated_non_loopback_listener;
 use super::forward_incoming_message;
 use super::next_connection_id;
 use super::serialize_outgoing_message;
@@ -26,6 +23,9 @@ use axum::response::IntoResponse;
 use axum::response::Response;
 use axum::routing::any;
 use axum::routing::get;
+use codex_websocket_auth::WebsocketAuthPolicy;
+use codex_websocket_auth::authorize_upgrade;
+use codex_websocket_auth::is_unauthenticated_non_loopback_listener;
 use futures::SinkExt;
 use futures::StreamExt;
 use owo_colors::OwoColorize;
@@ -120,8 +120,13 @@ async fn websocket_upgrade_handler(
     websocket
         .on_upgrade(move |stream| async move {
             let (websocket_writer, websocket_reader) = stream.split();
-            run_websocket_connection(websocket_writer, websocket_reader, state.transport_event_tx)
-                .await;
+            run_websocket_connection(
+                websocket_writer,
+                websocket_reader,
+                ConnectionOrigin::WebSocket,
+                state.transport_event_tx,
+            )
+            .await;
         })
         .into_response()
 }
@@ -172,6 +177,7 @@ pub async fn start_websocket_acceptor(
 pub(crate) async fn run_websocket_connection<M, SinkError, StreamError>(
     websocket_writer: impl futures::sink::Sink<M, Error = SinkError> + Send + 'static,
     websocket_reader: impl futures::stream::Stream<Item = Result<M, StreamError>> + Send + 'static,
+    origin: ConnectionOrigin,
     transport_event_tx: mpsc::Sender<TransportEvent>,
 ) where
     M: AppServerWebSocketMessage + Send + 'static,
@@ -186,7 +192,7 @@ pub(crate) async fn run_websocket_connection<M, SinkError, StreamError>(
     if transport_event_tx
         .send(TransportEvent::ConnectionOpened {
             connection_id,
-            origin: ConnectionOrigin::WebSocket,
+            origin,
             auth: None,
             writer: writer_tx,
             disconnect_sender: Some(disconnect_token.clone()),

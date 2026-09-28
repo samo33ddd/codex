@@ -74,7 +74,10 @@ async fn hidden_and_queued_voice_answers_share_a_lossless_sixteen_item_cap() {
     let (mut chat, _sender, mut events, mut ops) = make_chatwidget_manual_with_sender().await;
     let thread_id = activate_voice(&mut chat);
     let mut oldest_delivery_id = None;
-    for index in 0..=super::super::MAX_PENDING_SPEECH_DELIVERIES {
+    for index in 0..=2 * super::super::MAX_PENDING_SPEECH_DELIVERIES {
+        if index == super::super::MAX_PENDING_SPEECH_DELIVERIES + 1 {
+            chat.park_voice();
+        }
         let turn_id = format!("turn-{index}");
         start_item(
             &mut chat,
@@ -123,6 +126,12 @@ async fn hidden_and_queued_voice_answers_share_a_lossless_sixteen_item_cap() {
     }
     assert_eq!(restored, 1);
     assert!(ops.try_recv().is_err());
+    chat.stop_realtime_conversation();
+    chat.reset_realtime_conversation();
+    assert_eq!(
+        chat.take_undelivered_realtime_speech_for_replay().len(),
+        super::super::MAX_PENDING_SPEECH_DELIVERIES
+    );
 }
 
 #[tokio::test]
@@ -401,22 +410,21 @@ async fn answer_exceeding_speech_budget_is_shown_in_full_instead() {
     assert!(chat.realtime_conversation.pending_speech.is_empty());
     let rendered = std::iter::from_fn(|| events.try_recv().ok())
         .filter_map(|event| match event {
-            AppEvent::InsertHistoryCell(cell) => Some(
-                cell.transcript_lines(/*width*/ 80)
-                    .into_iter()
-                    .map(|line| line.to_string())
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-            ),
+            AppEvent::InsertHistoryCell(cell) if !cell.as_any().is::<FinalMessageSeparator>() => {
+                Some(
+                    cell.transcript_lines(/*width*/ 80)
+                        .into_iter()
+                        .map(|line| line.to_string())
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                )
+            }
             _ => None,
         })
         .collect::<Vec<_>>()
         .join("\n");
     assert_eq!(
-        without_completion_metadata(&rendered)
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" "),
+        rendered.split_whitespace().collect::<Vec<_>>().join(" "),
         format!("• {text}")
             .split_whitespace()
             .collect::<Vec<_>>()

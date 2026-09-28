@@ -44,6 +44,10 @@ pub struct ClientInfo {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct InitializeCapabilities {
+    /// Use explicit gateway OAuth login instead of automatic browser authorization.
+    /// Applies to this app-server's gateway runtime; later connections cannot undo it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub explicit_gateway_oauth: bool,
     /// Opt into receiving experimental API methods and fields.
     #[serde(default)]
     pub experimental_api: bool,
@@ -77,6 +81,9 @@ pub struct InitializeResponse {
     /// Operating system for the running app-server target, for example
     /// `"macos"`, `"linux"`, or `"windows"`.
     pub platform_os: String,
+    /// True only when this process accepts transient hook ownership on its local daemon socket.
+    #[serde(default)]
+    pub supports_hook_owner: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]

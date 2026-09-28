@@ -165,6 +165,7 @@ single_version_override(
     patches = [
         "//patches:rules_foreign_cc_make_cppflags.patch",
         "//patches:rules_foreign_cc_make_xcompile.patch",
+        "//patches:rules_foreign_cc_make_msvc_stdint.patch",
     ],
     version = "0.15.1",
 )
@@ -188,6 +189,7 @@ single_version_override(
     patch_strip = 1,
     patches = [
         "//patches:rules_rs_build_script_deps_annotation.patch",
+        "//patches:rules_rs_rust_debug_modes.patch",
         "//patches:rules_rs_windows_msvc_linker.patch",
         "//patches:rules_rs_zlib_snapshot_urls.patch",
     ],
@@ -208,6 +210,7 @@ rules_rust.patch(
         "//patches:rules_rust_windows_process_wrapper_skip_temp_outputs.patch",
         # Group build-script argument files to avoid Windows command-line limits.
         "//patches:rules_rust_group_build_script_arg_files.patch",
+        "//patches:rules_rust_windows_execroot_separators.patch",
     ],
     strip = 1,
 )
@@ -490,8 +493,8 @@ codex_release_archive = use_extension(
     "codex_release_archive",
 )
 codex_release_archive.release(
-    sha256 = "0b7afd1de4ecf06a8633f1e4958ec5f8d57d4b7842773416d9cb9d8c816f2c84",
-    version = "0.153.1",
+    sha256 = "8b711520beddf385467b8da4d2c93736637c6ba1e46811cf0d8606b7c490b6f6",
+    version = "0.156.1",
 )
 codex_release_archive.release(
     sha256 = "71a28d362c96ac9829bf8203a2c71be451aeb726adb843167fdaf0eae8fe7dd9",
@@ -500,7 +503,7 @@ codex_release_archive.release(
 use_repo(
     codex_release_archive,
     "codex_release_0.145.0_linux_x86_64",
-    "codex_release_0.153.1_linux_x86_64",
+    "codex_release_0.156.1_linux_x86_64",
 )
 
 http_file = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_file")

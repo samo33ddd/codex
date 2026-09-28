@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::ffi::OsStr;
 use std::ffi::OsString;
 #[cfg(windows)]
 use std::fs;
@@ -15,6 +14,7 @@ use codex_protocol::protocol::HookCompletedEvent;
 use codex_protocol::protocol::HookEventName;
 use codex_protocol::protocol::HookOutputEntry;
 use codex_protocol::protocol::HookOutputEntryKind;
+use codex_protocol::protocol::HookOwner;
 use codex_protocol::protocol::HookRunStatus;
 use codex_protocol::protocol::HookSource;
 use codex_protocol::shell_environment::CODEX_EXEC_SERVER_NOISE_AUTH_TOKEN_ENV_VAR;
@@ -33,7 +33,10 @@ use super::CommandShell;
 use super::ConfiguredHandler;
 use super::MAX_CONCURRENT_ASYNC_HOOKS;
 use super::build_command;
+use super::default_shell_program;
 use super::run_command;
+use crate::HookOwnerChangePolicy;
+use crate::HookOwnerHandle;
 use crate::events::user_prompt_submit::UserPromptSubmitRequest;
 
 #[cfg(unix)]
@@ -139,8 +142,60 @@ async fn hook_shell_startup_does_not_stop_on_controlling_terminal() {
         result_sender,
     );
 
-    let result = run_command(&runtime, &handler, command, &env, "{}", temp.path()).await;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    static FORKS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        use std::sync::atomic::Ordering;
+        extern "C" fn record_parent_fork() {
+            FORKS.fetch_add(1, Ordering::SeqCst);
+        }
+        // Registration cannot be undone, so keep it in this isolated TTY child.
+        // SAFETY: The callback only updates a lock-free atomic in the parent.
+        assert_eq!(
+            unsafe {
+                libc::pthread_atfork(
+                    /*prepare*/ None,
+                    Some(record_parent_fork),
+                    /*child*/ None,
+                )
+            },
+            0
+        );
+        let mut baseline = tokio::process::Command::new("/bin/sh");
+        baseline.args(["-c", "exit 0"]);
+        // SAFETY: A no-op callback forces fork for the positive control.
+        unsafe {
+            baseline.pre_exec(|| Ok(()));
+        }
+        assert!(baseline.status().await.expect("fork control").success());
+        assert_eq!(FORKS.load(Ordering::SeqCst), 1);
+    }
 
+    let result = run_command(&runtime, &handler, command, &env, "{}", temp.path()).await;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        let native_chdir_supported = {
+            // SAFETY: Only inspect symbol availability, matching the launcher.
+            !unsafe {
+                libc::dlsym(
+                    libc::RTLD_DEFAULT,
+                    c"posix_spawn_file_actions_addchdir_np".as_ptr(),
+                )
+            }
+            .is_null()
+        };
+        #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+        let native_chdir_supported = true;
+        if native_chdir_supported {
+            assert_eq!(
+                FORKS.load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "hook must avoid forking its parent"
+            );
+        }
+    }
     assert_eq!(result.exit_code, Some(0), "stderr: {}", result.stderr);
     assert_eq!(result.stdout, "hook-ran");
     assert_eq!(result.error, None);
@@ -330,8 +385,8 @@ async fn command_hook_does_not_expose_configured_noise_auth_token() {
     assert_eq!(result.error, None);
 }
 
-#[test]
-fn build_command_replays_snapshot_before_hook_overrides_and_scrubbing() {
+#[tokio::test]
+async fn build_command_replays_snapshot_before_hook_overrides_and_scrubbing() {
     #[cfg(unix)]
     let non_unicode_value = OsString::from_vec(vec![b'v', 0xff]);
     let environment = vec![
@@ -348,10 +403,7 @@ fn build_command_replays_snapshot_before_hook_overrides_and_scrubbing() {
             OsString::from("captured-noise-token"),
         ),
         #[cfg(unix)]
-        (
-            OsString::from("CODEX_HOOK_NON_UNICODE"),
-            non_unicode_value.clone(),
-        ),
+        (OsString::from("CODEX_HOOK_NON_UNICODE"), non_unicode_value),
     ];
     let env = HashMap::from([
         ("CODEX_HOOK_OVERRIDE".to_string(), "configured".to_string()),
@@ -361,36 +413,46 @@ fn build_command_replays_snapshot_before_hook_overrides_and_scrubbing() {
             "configured-noise-token".to_string(),
         ),
     ]);
+    #[cfg(not(windows))]
+    let (program, args, command_line) = (
+        "/bin/sh",
+        vec!["-c".to_string()],
+        "printf '%s\\n' \"$CODEX_HOOK_SNAPSHOT\" \"$CODEX_HOOK_OVERRIDE\" \"$CODEX_HOOK_SAFE_ENV\" \"${CODEX_EXEC_SERVER_NOISE_AUTH_TOKEN-absent}\" \"$CODEX_HOOK_NON_UNICODE\"",
+    );
+    #[cfg(windows)]
+    let (program, args, command_line) = (
+        "cmd.exe",
+        vec!["/D".to_string(), "/C".to_string()],
+        "echo %CODEX_HOOK_SNAPSHOT%&echo %CODEX_HOOK_OVERRIDE%&echo %CODEX_HOOK_SAFE_ENV%&if defined CODEX_EXEC_SERVER_NOISE_AUTH_TOKEN (echo leaked) else (echo absent)",
+    );
     let command = build_command(
         &CommandShell {
-            program: "configured-shell".to_string(),
-            args: vec!["-c".to_string()],
+            program: program.to_string(),
+            args,
         },
-        "echo hook-ran",
+        command_line,
         &environment,
         &env,
+        None,
     );
-
-    assert_eq!(
-        configured_environment_value(&command, "CODEX_HOOK_SNAPSHOT"),
-        Some(Some(OsString::from("captured")))
-    );
-    assert_eq!(
-        configured_environment_value(&command, "CODEX_HOOK_OVERRIDE"),
-        Some(Some(OsString::from("configured")))
-    );
-    assert_eq!(
-        configured_environment_value(&command, "CODEX_HOOK_SAFE_ENV"),
-        Some(Some(OsString::from("visible")))
-    );
-    assert_eq!(
-        configured_environment_value(&command, CODEX_EXEC_SERVER_NOISE_AUTH_TOKEN_ENV_VAR),
-        None
-    );
+    #[cfg(not(unix))]
+    let mut command = command;
+    let output = command
+        .spawn()
+        .expect("spawn hook")
+        .wait_with_output()
+        .await
+        .expect("hook output");
+    assert!(output.status.success(), "{output:?}");
     #[cfg(unix)]
     assert_eq!(
-        configured_environment_value(&command, "CODEX_HOOK_NON_UNICODE"),
-        Some(Some(non_unicode_value))
+        output.stdout,
+        b"captured\nconfigured\nvisible\nabsent\nv\xff\n"
+    );
+    #[cfg(windows)]
+    assert_eq!(
+        output.stdout,
+        b"captured\r\nconfigured\r\nvisible\r\nabsent\r\n"
     );
 }
 
@@ -400,26 +462,214 @@ fn fallback_shell_uses_snapshot() {
     let (name, program) = ("comspec", r"C:\captured\cmd.exe");
     #[cfg(not(windows))]
     let (name, program) = ("SHELL", "/captured/shell");
+    assert_eq!(
+        default_shell_program(&[(OsString::from(name), OsString::from(program))]),
+        OsString::from(program),
+    );
+}
+
+#[test]
+fn managed_hook_owner_replaces_and_clears_frozen_identity_environment() {
+    let environment = [
+        ("ORCA_PANE_KEY", "pane-old"),
+        ("ORCA_TAB_ID", "tab-old"),
+        ("ORCA_WORKTREE_ID", "worktree-old"),
+        ("ORCA_AGENT_LAUNCH_TOKEN", "launch-old"),
+        ("ORCA_AGENT_HOOK_ENDPOINT", "endpoint-old"),
+        ("ORCA_AGENT_HOOK_TOKEN", "hook-secret-old"),
+        ("CODEX_HOOK_SNAPSHOT", "captured"),
+    ]
+    .map(|(key, value)| (OsString::from(key), OsString::from(value)))
+    .to_vec();
+    let env = HashMap::from([
+        ("ORCA_PANE_KEY".to_string(), "configured-pane".to_string()),
+        ("ORCA_TAB_ID".to_string(), "configured-tab".to_string()),
+        ("CODEX_HOOK_CONFIG".to_string(), "configured".to_string()),
+    ]);
+    let owner = test_hook_owner("pane-new");
     let command = build_command(
         &CommandShell {
+            program: "cmd-test".to_string(),
+            args: Vec::new(),
+        },
+        "noop",
+        &environment,
+        &env,
+        Some(&owner),
+    );
+    let configured_environment = command
+        .as_std()
+        .get_envs()
+        .filter_map(|(name, value)| {
+            value.map(|value| {
+                (
+                    name.to_string_lossy().into_owned(),
+                    value.to_string_lossy().into_owned(),
+                )
+            })
+        })
+        .collect::<HashMap<_, _>>();
+
+    assert_eq!(
+        configured_environment
+            .get("ORCA_PANE_KEY")
+            .map(String::as_str),
+        Some("pane-new")
+    );
+    assert_eq!(
+        configured_environment
+            .get("ORCA_AGENT_HOOK_ENDPOINT")
+            .map(String::as_str),
+        Some(owner.hook_endpoint_path.as_str())
+    );
+    assert_eq!(
+        configured_environment
+            .get("ORCA_AGENT_LAUNCH_TOKEN")
+            .map(String::as_str),
+        Some("launch-test")
+    );
+    assert_eq!(
+        configured_environment
+            .get("CODEX_HOOK_SNAPSHOT")
+            .map(String::as_str),
+        Some("captured")
+    );
+    assert_eq!(
+        configured_environment
+            .get("CODEX_HOOK_CONFIG")
+            .map(String::as_str),
+        Some("configured")
+    );
+    for absent in ["ORCA_TAB_ID", "ORCA_WORKTREE_ID", "ORCA_AGENT_HOOK_TOKEN"] {
+        assert!(
+            !configured_environment.contains_key(absent),
+            "{absent} leaked"
+        );
+    }
+}
+
+#[tokio::test]
+async fn command_hook_captures_latest_owner_when_execution_begins() {
+    let temp = TempDir::new().expect("async test directory");
+    let handler = write_handler(
+        &temp,
+        "import json, os, sys\njson.load(sys.stdin)\nprint(os.environ.get('ORCA_PANE_KEY', 'missing'))\n",
+    );
+    let command_line = match &handler.kind {
+        ConfiguredHandlerKind::Command { command, .. } => command.clone(),
+        ConfiguredHandlerKind::McpTool { .. } => panic!("test hook must be a command"),
+    };
+    let old_owner = test_hook_owner("pane-old");
+    let new_owner = test_hook_owner("pane-new");
+    let owner_handle =
+        HookOwnerHandle::for_managed_session(old_owner).expect("valid managed owner");
+    let (result_sender, _result_receiver) = async_channel::unbounded();
+    let runtime = CommandHookRuntime::new_with_owner_handle(
+        CommandShell {
             program: String::new(),
             args: Vec::new(),
         },
-        "echo hook-ran",
-        &[(OsString::from(name), OsString::from(program))],
-        &HashMap::new(),
+        Arc::new({
+            let mut environment = std::env::vars_os().collect::<HashMap<_, _>>();
+            environment.insert(
+                OsString::from("ORCA_PANE_KEY"),
+                OsString::from("frozen-daemon-pane"),
+            );
+            environment.into_iter().collect::<Vec<_>>()
+        }),
+        ThreadId::new(),
+        result_sender,
+        owner_handle.clone(),
+    );
+    let current_directory = HashMap::new();
+    let hook = run_command(
+        &runtime,
+        &handler,
+        &command_line,
+        &current_directory,
+        "{}",
+        temp.path(),
     );
 
-    assert_eq!(command.as_std().get_program(), OsStr::new(program));
-    #[cfg(not(windows))]
+    owner_handle
+        .replace(new_owner)
+        .await
+        .expect("no hook is running before the future is polled");
+    let result = hook.await;
+
+    assert_eq!(result.exit_code, Some(0), "stderr: {}", result.stderr);
+    assert_eq!(result.stdout.trim(), "pane-new");
+}
+
+#[tokio::test]
+#[expect(
+    clippy::await_holding_invalid_type,
+    reason = "The read guard is held across refresh awaits to exercise the bounded timeout and verify the old owner is preserved."
+)]
+async fn hook_owner_handoff_is_bounded_and_keeps_old_owner_on_timeout() {
+    let old_owner = test_hook_owner("pane-old");
+    let new_owner = test_hook_owner("pane-new");
+    let handle =
+        HookOwnerHandle::for_managed_session(old_owner.clone()).expect("valid managed owner");
+    let read_guard = handle.owner.read().await;
+
     assert_eq!(
-        command
-            .as_std()
-            .get_args()
-            .map(OsStr::to_os_string)
-            .collect::<Vec<_>>(),
-        vec![OsString::from("-lc"), OsString::from("echo hook-ran")]
+        handle
+            .replace_with_policy_timeout(
+                old_owner.clone(),
+                HookOwnerChangePolicy::RequireSameOwner,
+                Duration::from_millis(20),
+            )
+            .await,
+        Ok(()),
+        "same-owner reconnect should not wait for active hooks"
     );
+    assert_eq!(
+        handle
+            .replace_with_policy_timeout(
+                new_owner.clone(),
+                HookOwnerChangePolicy::RequireSameOwner,
+                Duration::from_millis(20),
+            )
+            .await,
+        Err("hook owner is still attached to another client")
+    );
+    assert_eq!(
+        handle
+            .replace_with_timeout(new_owner.clone(), Duration::from_millis(20))
+            .await,
+        Err("hook owner handoff timed out; retry the refresh")
+    );
+    assert_eq!(read_guard.as_ref(), Some(&old_owner));
+
+    drop(read_guard);
+    assert_eq!(handle.replace(new_owner.clone()).await, Ok(()));
+    assert_eq!(handle.owner.read().await.as_ref(), Some(&new_owner));
+}
+
+fn test_hook_owner(pane_key: &str) -> HookOwner {
+    HookOwner {
+        pane_key: pane_key.to_string(),
+        tab_id: None,
+        worktree_id: None,
+        launch_token: Some("launch-test".to_string()),
+        hook_endpoint_path: if cfg!(windows) {
+            "C:\\orca\\hook-endpoint.json".to_string()
+        } else {
+            "/tmp/orca/hook-endpoint.json".to_string()
+        },
+    }
+}
+
+#[test]
+fn hook_owner_handle_identity_is_shared_only_by_clones() {
+    let owner = test_hook_owner("pane");
+    let parent = HookOwnerHandle::for_managed_session(owner.clone()).expect("valid owner");
+    let child = parent.clone();
+    let public_fork = HookOwnerHandle::for_managed_session(owner).expect("valid owner");
+
+    assert!(parent.is_same_handle(&child));
+    assert!(!parent.is_same_handle(&public_fork));
 }
 
 const ASYNC_HOOK_TEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -443,17 +693,6 @@ fn runtime_with_environment(
         result_sender,
     );
     (runtime, result_receiver)
-}
-
-fn configured_environment_value(
-    command: &tokio::process::Command,
-    name: &str,
-) -> Option<Option<OsString>> {
-    command
-        .as_std()
-        .get_envs()
-        .find(|(key, _)| *key == OsStr::new(name))
-        .map(|(_, value)| value.map(OsStr::to_os_string))
 }
 
 fn write_handler(temp: &TempDir, source: &str) -> ConfiguredHandler {
@@ -692,4 +931,230 @@ print(json.dumps({{
             .is_err(),
         "shutdown must not deliver a late async result"
     );
+}
+
+#[cfg(unix)]
+async fn process_is_running(pid: &str) -> bool {
+    let output = tokio::process::Command::new("ps")
+        .args(["-p", pid, "-o", "stat="])
+        .output()
+        .await
+        .expect("inspect hook process state");
+    assert!(output.stderr.is_empty(), "{output:?}");
+    assert!(output.status.success() || output.status.code() == Some(1));
+    String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .any(|state| !state.starts_with('Z'))
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cancelled_and_timed_out_hooks_kill_their_process_group() {
+    enum Termination {
+        Cancellation,
+        Timeout,
+    }
+
+    for termination in [Termination::Cancellation, Termination::Timeout] {
+        let temp = tempdir().expect("create temp dir");
+        let mut handler = write_handler(
+            &temp,
+            r#"import os
+from pathlib import Path
+import subprocess
+import time
+
+child = subprocess.Popen(['sleep', '60'])
+Path('hook-pids.tmp').write_text(f'{os.getpid()} {child.pid}')
+Path('hook-pids.tmp').rename('hook-pids')
+time.sleep(60)
+"#,
+        );
+        handler.timeout_sec = 2;
+        let ConfiguredHandlerKind::Command { command, env, .. } = &handler.kind else {
+            panic!("expected command hook");
+        };
+        let (mut runtime, _result_receiver) = runtime();
+        runtime.shell.program = "/bin/sh".into();
+        runtime.shell.args = vec!["-c".into()];
+        let mut run = Box::pin(run_command(
+            &runtime,
+            &handler,
+            command,
+            env,
+            "{}",
+            temp.path(),
+        ));
+        let pids = timeout(Duration::from_secs(10), async {
+            loop {
+                if let Ok(pids) = std::fs::read_to_string(temp.path().join("hook-pids")) {
+                    break pids;
+                }
+                tokio::select! {
+                    result = &mut run => panic!("hook exited before cancellation: {result:?}"),
+                    _ = sleep(Duration::from_millis(10)) => {}
+                }
+            }
+        })
+        .await
+        .expect("hook and descendant must start");
+        match termination {
+            Termination::Cancellation => drop(run),
+            Termination::Timeout => {
+                let result = timeout(Duration::from_secs(10), run)
+                    .await
+                    .expect("hook timeout completes");
+                assert_eq!(result.error, Some("hook timed out after 2s".to_string()));
+            }
+        }
+        timeout(Duration::from_secs(10), async {
+            loop {
+                let mut all_stopped = true;
+                for pid in pids.split_whitespace() {
+                    all_stopped &= !process_is_running(pid).await;
+                }
+                if all_stopped {
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("cancellation and timeout must stop both hook and descendant");
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn completed_hook_preserves_background_descendant() {
+    for exit_code in [0, 23] {
+        let temp = tempdir().expect("create temp dir");
+        let handler = write_handler(
+            &temp,
+            &format!(
+                r#"import subprocess
+
+subprocess.Popen(
+    ['sh', '-c', 'i=0; while [ ! -f release-descendant ] && [ "$i" -lt 500 ]; do sleep 0.01; i=$((i + 1)); done; printf survived > descendant-result.tmp; mv descendant-result.tmp descendant-result'],
+    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+raise SystemExit({exit_code})
+"#
+            ),
+        );
+        let ConfiguredHandlerKind::Command { command, env, .. } = &handler.kind else {
+            panic!("expected command hook");
+        };
+        let (mut runtime, _result_receiver) = runtime();
+        runtime.shell.program = "/bin/sh".into();
+        runtime.shell.args = vec!["-c".into()];
+        let result = run_command(&runtime, &handler, command, env, "{}", temp.path()).await;
+        // Release even on a failed assertion so a failed test does not leak a waiter.
+        std::fs::write(temp.path().join("release-descendant"), "").expect("release descendant");
+        assert_eq!((result.exit_code, result.error), (Some(exit_code), None));
+        let result_path = temp.path().join("descendant-result");
+        timeout(Duration::from_secs(10), async {
+            while !result_path.exists() {
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("completed hook must leave its descendant running");
+        assert_eq!(std::fs::read_to_string(result_path).unwrap(), "survived");
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn exited_hook_leader_with_open_descendant_output_still_times_out() {
+    let temp = tempdir().expect("create temp dir");
+    let mut handler = write_handler(
+        &temp,
+        r#"from pathlib import Path
+import subprocess
+
+child = subprocess.Popen(['sleep', '60'])
+Path('descendant-pid').write_text(str(child.pid))
+"#,
+    );
+    handler.timeout_sec = 2;
+    let ConfiguredHandlerKind::Command { command, env, .. } = &handler.kind else {
+        panic!("expected command hook");
+    };
+    let (mut runtime, _result_receiver) = runtime();
+    runtime.shell.program = "/bin/sh".into();
+    runtime.shell.args = vec!["-c".into()];
+    let result = run_command(&runtime, &handler, command, env, "{}", temp.path()).await;
+    assert_eq!(result.error, Some("hook timed out after 2s".to_string()));
+    let pid = std::fs::read_to_string(temp.path().join("descendant-pid"))
+        .expect("descendant started before its parent exited");
+    timeout(Duration::from_secs(10), async {
+        while process_is_running(pid.trim()).await {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("hook timeout must stop the descendant after the leader exits");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn hook_rejects_nul_arguments_before_execution() {
+    for nul_in_shell_args in [false, true] {
+        let root = tempdir().expect("tempdir");
+        let (mut runtime, _receiver) = runtime();
+        runtime.shell = CommandShell {
+            program: "/usr/bin/touch".to_string(),
+            args: if nul_in_shell_args {
+                vec!["bad\0arg".to_string()]
+            } else {
+                Vec::new()
+            },
+        };
+        let command = if nul_in_shell_args { "ran" } else { "bad\0arg" };
+        let handler = write_handler(&root, "");
+        let result = run_command(
+            &runtime,
+            &handler,
+            command,
+            &HashMap::new(),
+            "",
+            root.path(),
+        )
+        .await;
+        assert!(result.error.is_some(), "invalid hook ran: {result:?}");
+        assert_eq!(result.exit_code, None);
+        assert!(!root.path().join("ran").exists());
+        assert!(!root.path().join("<string-with-nul>").exists());
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn hook_rejects_nul_in_configured_and_default_shell_program() {
+    for configured in [false, true] {
+        let root = tempdir().expect("tempdir");
+        let (mut runtime, _receiver) = runtime_with_environment(Arc::new(vec![(
+            OsString::from("SHELL"),
+            OsString::from("/bin/sh\0"),
+        )]));
+        if configured {
+            runtime.shell.program = "/bin/sh\0".to_string();
+        }
+        let handler = write_handler(&root, "");
+        let result = run_command(
+            &runtime,
+            &handler,
+            "printf ran > ran",
+            &HashMap::new(),
+            "",
+            root.path(),
+        )
+        .await;
+        assert_eq!(
+            result.error.as_deref(),
+            Some("nul byte found in provided data")
+        );
+        assert_eq!(result.exit_code, None);
+        assert!(!root.path().join("ran").exists());
+    }
 }

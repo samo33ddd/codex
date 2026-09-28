@@ -25,14 +25,16 @@ This fork preserves the history of [openai/codex](https://github.com/openai/code
 
 ## Compatibility
 
-| Component | Verified baseline |
+| Component | Source target / recorded desktop baseline |
 |---|---|
 | Windows desktop app | `26.911.7940.0` |
-| Backend version | `0.155.0-alpha.2.6` |
-| Upstream source tag | `rust-v0.155.0-alpha.2.6` |
-| Upstream source commit | `bf6f0a4ec97919bf697cdc532e7b8af4ec482fc6` |
+| Backend version | `0.158.0-alpha.8` |
+| Upstream source tag | `rust-v0.158.0-alpha.8` |
+| Upstream source commit | `e4b68615f06621c43b365d66823ed01b8f8e8416` |
 | Platform | Windows x64, PowerShell 7 |
 | Rust toolchain | `1.95.0` |
+
+The source now includes the custom-alpha daemon fixes and readable Orca/Tavily actions. The desktop screenshots and acceptance evidence below were recorded with backend `0.155.0-alpha.2.6`; they do not establish desktop acceptance of the merged `0.158.0-alpha.8` build.
 
 The launcher follows the installed desktop app. On first use or after an app update, it automatically prepares a new local bundle and verifies its executable, UI archive and custom backend. Desktop version numbers are recorded baselines, not a launch allowlist. The custom backend remains pinned to the version in [compatibility.json](scripts/powershell-parity/compatibility.json); this does not download or build new backend releases.
 
@@ -120,8 +122,9 @@ This upstream tag normalizes local workspace package versions in Cargo.lock duri
 ## Branches and updates
 
 - `main`: clean upstream snapshot; do not merge the patch here.
-- `powershell-action-parity`: default branch for the patch, documentation, CI, and update checks.
-- `ps-actions/0.155.0-alpha.2.6`: maintenance branch for the recorded source baseline.
+- `powershell-action-parity`: combined default branch for PowerShell/desktop changes and the merged custom-alpha daemon/TUI fixes.
+- `codex/custom-alpha`: source branch of the merged daemon/TUI fixes.
+- `ps-actions/0.155.0-alpha.2.6`: maintenance branch for the previous source baseline.
 
 The [upstream compatibility workflow](https://github.com/samo33ddd/codex/actions/workflows/powershell-upstream.yml) runs every Monday at 06:37 UTC and can be started manually with a source tag. It checks patch applicability using an isolated Git index. It never checks out or executes candidate source, rewrites a branch, pushes, or updates a desktop installation. Its summary and JSON artifact distinguish an applicable patch, an already-applied patch, and a conflict. A conflict is a report outcome, not a claim that tests passed.
 
@@ -137,4 +140,4 @@ The two PowerShell workflows use standard hosted runners and do not require Open
 
 ## License
 
-[Apache-2.0](LICENSE), with the upstream [NOTICE](NOTICE) retained. Upstream documentation is available in [openai/codex](https://github.com/openai/codex/tree/rust-v0.155.0-alpha.2.6).
+[Apache-2.0](LICENSE), with the upstream [NOTICE](NOTICE) retained. Upstream documentation is available in [openai/codex](https://github.com/openai/codex/tree/rust-v0.158.0-alpha.8).

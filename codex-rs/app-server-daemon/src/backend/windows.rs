@@ -1,6 +1,7 @@
 //! Windows process identity and file locks. Keep a process handle across shutdown
 //! so PID reuse can never redirect forced termination to a different process.
 //! Managed servers must not elevate ordinary clients sharing the account's socket.
+//! Installer jobs contain extraction processes when an update is cancelled.
 
 use std::io;
 use std::os::windows::io::AsRawHandle;
@@ -34,8 +35,8 @@ use windows_sys::Win32::System::JobObjects::JOBOBJECT_EXTENDED_LIMIT_INFORMATION
 use windows_sys::Win32::System::JobObjects::JobObjectExtendedLimitInformation;
 use windows_sys::Win32::System::JobObjects::SetInformationJobObject;
 use windows_sys::Win32::System::Threading::CREATE_BREAKAWAY_FROM_JOB;
+use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
 use windows_sys::Win32::System::Threading::CREATE_SUSPENDED;
-use windows_sys::Win32::System::Threading::DETACHED_PROCESS;
 use windows_sys::Win32::System::Threading::GetCurrentProcess;
 use windows_sys::Win32::System::Threading::GetProcessId;
 use windows_sys::Win32::System::Threading::GetProcessTimes;
@@ -47,6 +48,8 @@ use windows_sys::Win32::System::Threading::PROCESS_SYNCHRONIZE;
 use windows_sys::Win32::System::Threading::PROCESS_TERMINATE;
 use windows_sys::Win32::System::Threading::TerminateProcess;
 use windows_sys::Win32::System::Threading::WaitForSingleObject;
+
+pub(super) const DAEMON_PROCESS_CREATION_FLAGS: u32 = CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB;
 
 pub(crate) fn ensure_not_elevated() -> Result<()> {
     let mut token = 0;
@@ -80,7 +83,7 @@ pub(crate) fn ensure_not_elevated() -> Result<()> {
 // job attached. Suspend the image so no application code runs before cleanup.
 pub(crate) fn ensure_detached_launch(executable: &Path) -> Result<()> {
     let mut child = Command::new(executable)
-        .creation_flags(CREATE_SUSPENDED | DETACHED_PROCESS | CREATE_BREAKAWAY_FROM_JOB)
+        .creation_flags(CREATE_SUSPENDED | DAEMON_PROCESS_CREATION_FLAGS)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -244,6 +247,18 @@ pub(crate) fn try_lock_file(file: &tokio::fs::File) -> Result<bool> {
 // Keep installer descendants bounded by the updater's lifetime, while allowing
 // app-server launches and successor updaters to break away from this job.
 pub(crate) fn updater_job() -> Result<OwnedHandle> {
+    process_job(unsafe { GetCurrentProcess() })
+}
+
+/// Called before writing the installer script, while PowerShell is waiting on stdin.
+pub(crate) fn installer_job(child: &tokio::process::Child) -> Result<OwnedHandle> {
+    let process = child
+        .raw_handle()
+        .context("installer process handle is unavailable")?;
+    process_job(process as isize)
+}
+
+fn process_job(process: isize) -> Result<OwnedHandle> {
     let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
     if job == 0 {
         return Err(io::Error::last_os_error()).context("failed to create updater job");
@@ -260,7 +275,7 @@ pub(crate) fn updater_job() -> Result<OwnedHandle> {
             std::mem::size_of_val(&limits) as u32,
         )
     } == 0
-        || unsafe { AssignProcessToJobObject(job, GetCurrentProcess()) } == 0
+        || unsafe { AssignProcessToJobObject(job, process) } == 0
     {
         return Err(io::Error::last_os_error())
             .context("failed to contain updater installer processes");

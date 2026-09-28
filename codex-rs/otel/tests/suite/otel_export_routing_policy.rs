@@ -24,6 +24,7 @@ use codex_protocol::ThreadId;
 use codex_protocol::ToolName;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::config_types::ToolResultLogConfig;
+use codex_protocol::models::ImageReference;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::protocol::SessionSource;
@@ -143,7 +144,9 @@ fn otel_export_routing_policy_routes_user_prompt_log_and_trace_events() {
                 text_elements: Vec::new(),
             },
             UserInput::Image {
-                image_url: "https://example.com/image.png".to_string(),
+                image: ImageReference::Inline {
+                    image_url: "https://example.com/image.png".to_string(),
+                },
                 detail: None,
             },
             UserInput::LocalImage {
@@ -253,7 +256,7 @@ fn otel_export_routing_policy_routes_tool_result_log_and_trace_events() {
 
     tracing::subscriber::with_default(subscriber, || {
         tracing::callsite::rebuild_interest_cache();
-        let manager = make_manager(root_id, SessionSource::Cli);
+        let manager = make_manager(root_id, SessionSource::Cli).with_product_sku(Some("codex"));
         let root_span = tracing::info_span!("root");
         let _root_guard = root_span.enter();
         let manager = manager.with_tool_result_log_config(ToolResultLogConfig {
@@ -281,7 +284,8 @@ fn otel_export_routing_policy_routes_tool_result_log_and_trace_events() {
                 agent_nickname: Some("legacy nickname".to_string()),
                 agent_role: None,
             }),
-        );
+        )
+        .with_product_sku(Some("customer-specific-value"));
         child.tool_result_with_tags(
             &ToolName::plain("shell"),
             "call-2",
@@ -356,6 +360,13 @@ fn otel_export_routing_policy_routes_tool_result_log_and_trace_events() {
     assert_eq!(
         tool_logs
             .iter()
+            .map(|attrs| attrs.get("product_sku").map(String::as_str))
+            .collect::<Vec<_>>(),
+        vec![Some("codex"), Some("other"), Some("codex"), None, None],
+    );
+    assert_eq!(
+        tool_logs
+            .iter()
             .map(|attrs| (
                 attrs["conversation.id"].clone(),
                 attrs["agent_name"].clone(),
@@ -415,6 +426,7 @@ fn otel_export_routing_policy_routes_tool_result_log_and_trace_events() {
         assert_eq!(attrs.get("tool_name"), log.get("tool_name"));
         assert_eq!(attrs.get("tool_namespace"), log.get("tool_namespace"));
         assert_eq!(attrs.get("tool_result_seq"), log.get("tool_result_seq"));
+        assert_eq!(attrs.get("product_sku"), log.get("product_sku"));
         assert_eq!(attrs.get("output_truncated"), log.get("output_truncated"));
         assert!(!attrs.contains_key("agent_name"));
     }
