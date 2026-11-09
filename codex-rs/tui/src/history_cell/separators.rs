@@ -21,6 +21,9 @@ use std::collections::HashSet;
 pub struct FinalMessageSeparator {
     elapsed_seconds: Option<u64>,
     runtime_metrics: Option<RuntimeMetricsSummary>,
+    /// Estimated average model output speed over the whole turn (tok/s), shown
+    /// as `~N tok/s avg` when known. Fed from streamed-output character counts.
+    avg_output_tok_per_sec: Option<f64>,
     completed_at: Option<DateTime<Local>>,
     display_date: NaiveDate,
     clock_format: ClockFormat,
@@ -63,6 +66,7 @@ impl FinalMessageSeparator {
         Self {
             elapsed_seconds,
             runtime_metrics,
+            avg_output_tok_per_sec: None,
             completed_at: None,
             display_date: Local::now().date_naive(),
             clock_format: ClockFormat::TwelveHour,
@@ -84,6 +88,13 @@ impl FinalMessageSeparator {
         runtime_metrics: Option<RuntimeMetricsSummary>,
     ) -> Self {
         self.runtime_metrics = runtime_metrics;
+        self
+    }
+
+    /// Attach the estimated average output speed for the turn (tok/s).
+    /// `None` hides the label entirely.
+    pub(crate) fn with_avg_output_rate(mut self, tokens_per_second: Option<f64>) -> Self {
+        self.avg_output_tok_per_sec = tokens_per_second;
         self
     }
 
@@ -120,6 +131,14 @@ impl FinalMessageSeparator {
         }
         if let Some(metrics_label) = self.runtime_metrics.and_then(runtime_metrics_label) {
             label_parts.push(metrics_label);
+        }
+        if let Some(rate) = self.avg_output_tok_per_sec {
+            let text = if rate >= 10.0 {
+                format!("~{rate:.0} tok/s avg")
+            } else {
+                format!("~{rate:.1} tok/s avg")
+            };
+            label_parts.push(text);
         }
         (!label_parts.is_empty()).then(|| label_parts.join(" • "))
     }

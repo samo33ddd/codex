@@ -26,12 +26,19 @@ const MIN_OBSERVED_CHARS: usize = 8;
 #[derive(Debug, Default)]
 pub(crate) struct OutputRateTracker {
     buckets: VecDeque<(Instant, usize)>,
+    /// First recorded output time this turn, if any. Used for the whole-turn
+    /// average rate in the completion separator.
+    started_at: Option<Instant>,
+    /// Total characters recorded this turn (not just the sliding window).
+    total_chars: usize,
 }
 
 impl OutputRateTracker {
     /// Reset the meter, e.g. at the start of a new turn.
     pub(crate) fn reset(&mut self) {
         self.buckets.clear();
+        self.started_at = None;
+        self.total_chars = 0;
     }
 
     /// Record `chars` output characters observed at `now`.
@@ -39,6 +46,8 @@ impl OutputRateTracker {
         if chars == 0 {
             return;
         }
+        self.started_at.get_or_insert(now);
+        self.total_chars += chars;
         self.evict(now);
         if let Some((bucket_start, count)) = self.buckets.back_mut()
             && now.duration_since(*bucket_start) < BUCKET_DURATION
@@ -72,6 +81,31 @@ impl OutputRateTracker {
         Some(total_chars as f64 / CHARS_PER_TOKEN / measured.as_secs_f64())
     }
 
+    /// Whole-turn average tokens/sec, for the completion separator.
+    ///
+    /// `turn_started_at` is when the turn actually began — for providers that
+    /// only send a final item the tracker may see all output in a single
+    /// instant, so its own `started_at` cannot measure a meaningful span.
+    /// Returns `None` when nothing was recorded this turn or the elapsed time is
+    /// too short to be meaningful. This is an average over the whole turn, not
+    /// a live rate, and shows as such in the UI.
+    pub(crate) fn turn_average_tokens_per_second(
+        &self,
+        turn_started_at: Instant,
+        now: Instant,
+    ) -> Option<f64> {
+        if self.total_chars < MIN_OBSERVED_CHARS {
+            return None;
+        }
+        let secs = now
+            .saturating_duration_since(turn_started_at)
+            .as_secs_f64();
+        if secs <= 0.0 {
+            return None;
+        }
+        Some(self.total_chars as f64 / CHARS_PER_TOKEN / secs)
+    }
+
     /// Drop buckets older than the measurement window.
     fn evict(&mut self, now: Instant) {
         while let Some((bucket_start, _)) = self.buckets.front() {
@@ -81,6 +115,14 @@ impl OutputRateTracker {
                 break;
             }
         }
+    }
+
+    /// Whether any output has been recorded this turn.
+    ///
+    /// Used by completion-time fallbacks: when the provider only sends a final
+    /// item (no streamed deltas), we still want the whole-turn average.
+    pub(crate) fn has_output(&self) -> bool {
+        self.total_chars > 0
     }
 }
 
@@ -134,5 +176,44 @@ mod tests {
         tracker.record(400, Instant::now());
         tracker.reset();
         assert!(tracker.tokens_per_second(Instant::now()).is_none());
+    }
+
+    #[test]
+    fn turn_average_uses_whole_turn() {
+        let mut tracker = OutputRateTracker::default();
+        let turn_started_at = Instant::now();
+        // Streamed output arrives throughout the turn; completion lands 8s
+        // after it started -> 400/4/8 = 12.5 tok/s regardless of the window.
+        tracker.record(100, turn_started_at + Duration::from_secs(1));
+        tracker.record(300, turn_started_at + Duration::from_secs(6));
+        let completion_at = turn_started_at + Duration::from_secs(8);
+        let rate = tracker
+            .turn_average_tokens_per_second(turn_started_at, completion_at)
+            .expect("avg rate");
+        assert!((rate - 12.5).abs() < 0.1, "unexpected avg rate {rate}");
+    }
+
+    #[test]
+    fn turn_average_none_without_output() {
+        let tracker = OutputRateTracker::default();
+        assert!(
+            tracker
+                .turn_average_tokens_per_second(Instant::now(), Instant::now())
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn turn_average_uses_turn_start_when_output_is_instant() {
+        // Provider sent only a final ItemCompleted: all text arrives at once,
+        // but the turn itself ran for 10s — the rate should reflect that.
+        let mut tracker = OutputRateTracker::default();
+        let turn_started_at = Instant::now();
+        let completion_at = turn_started_at + Duration::from_secs(10);
+        tracker.record(400, completion_at);
+        let rate = tracker
+            .turn_average_tokens_per_second(turn_started_at, completion_at)
+            .expect("avg rate");
+        assert!((rate - 10.0).abs() < 0.1, "unexpected avg rate {rate}");
     }
 }

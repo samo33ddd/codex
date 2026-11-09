@@ -178,13 +178,28 @@ impl ChatWidget {
         }
         let runtime_metrics = (!from_replay && !self.turn_runtime_metrics.is_empty())
             .then_some(self.turn_runtime_metrics);
+        let avg_output_rate = (!from_replay).then(|| {
+            let turn_started_at = self
+                .turn_lifecycle
+                .goal_status_active_turn_started_at
+                .unwrap_or_else(Instant::now);
+            self.output_rate
+                .turn_average_tokens_per_second(turn_started_at, Instant::now())
+        }).flatten();
         if let Some(completion) = completion {
-            self.add_to_history(completion.with_runtime_metrics(runtime_metrics));
+            self.add_to_history(
+                completion
+                    .with_runtime_metrics(runtime_metrics)
+                    .with_avg_output_rate(avg_output_rate),
+            );
         } else if let Some(runtime_metrics) = runtime_metrics {
-            self.add_to_history(history_cell::FinalMessageSeparator::new(
-                /*elapsed_seconds*/ None,
-                Some(runtime_metrics),
-            ));
+            self.add_to_history(
+                history_cell::FinalMessageSeparator::new(
+                    /*elapsed_seconds*/ None,
+                    Some(runtime_metrics),
+                )
+                .with_avg_output_rate(avg_output_rate),
+            );
         }
         self.turn_runtime_metrics = RuntimeMetricsSummary::default();
         if !from_replay {

@@ -546,6 +546,13 @@ impl ChatWidget {
                 AgentMessageContent::Text { text } => message.push_str(text),
             }
         }
+        // Fallback for providers that only send the final message (no deltas):
+        // feed the whole completed text into the rate meter so the completion
+        // separator can still show an average output speed for the turn.
+        if !from_replay && !self.output_rate.has_output() && !message.is_empty() {
+            self.output_rate
+                .record(message.chars().count(), Instant::now());
+        }
         let parsed = parse_assistant_markdown(&message, self.config.cwd.as_path());
         let questions = item.questions.as_deref().unwrap_or_default();
         let interrupted = self
