@@ -61,6 +61,9 @@ pub(crate) struct StatusIndicatorWidget {
     details_max_lines: usize,
     /// Optional suffix rendered after the elapsed/interrupt segment.
     inline_message: Option<String>,
+    /// Estimated model output speed rendered after the elapsed/interrupt
+    /// segment, independent of background-process summaries.
+    rate_text: Option<String>,
     /// Hook activity may move below the status row when it cannot fit in full.
     hook_status_message: Option<String>,
     show_interrupt_hint: bool,
@@ -102,6 +105,7 @@ impl StatusIndicatorWidget {
             details: None,
             details_max_lines: STATUS_DETAILS_DEFAULT_MAX_LINES,
             inline_message: None,
+            rate_text: None,
             hook_status_message: None,
             show_interrupt_hint: true,
             interrupt_binding: Some(key_hint::plain(KeyCode::Esc).into()),
@@ -161,6 +165,22 @@ impl StatusIndicatorWidget {
 
     pub(crate) fn update_hook_status_message(&mut self, message: Option<String>) {
         self.hook_status_message = message;
+    }
+
+    /// Update the estimated model output speed shown in the status row.
+    ///
+    /// Pass `None` to hide the indicator (for example when a turn ends or the
+    /// model has not produced enough output to measure yet).
+    pub(crate) fn update_output_rate(&mut self, tokens_per_second: Option<f64>) {
+        self.rate_text = tokens_per_second
+            .filter(|rate| rate.is_finite() && *rate > 0.0)
+            .map(|rate| {
+                if rate >= 10.0 {
+                    format!("~{rate:.0} tok/s")
+                } else {
+                    format!("~{rate:.1} tok/s")
+                }
+            });
     }
 
     pub(crate) fn header(&self) -> &str {
@@ -269,6 +289,10 @@ impl StatusIndicator<'_> {
             // interrupt affordances stay in a fixed visual location.
             spans.push(" · ".dim());
             spans.push(message.clone().dim());
+        }
+        if let Some(rate_text) = &row.rate_text {
+            spans.push(" · ".dim());
+            spans.push(rate_text.clone().dim());
         }
 
         let mut header = Line::from(spans);

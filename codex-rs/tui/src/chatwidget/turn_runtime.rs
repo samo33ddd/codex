@@ -106,6 +106,8 @@ impl ChatWidget {
         self.update_task_running_state();
         self.bottom_pane.ensure_status_indicator();
         self.bottom_pane.reset_status_timer(Duration::ZERO);
+        self.output_rate.reset();
+        self.bottom_pane.update_output_rate(None);
         self.status_state.retry_status_header = None;
         self.clear_active_hook_cell();
         self.status_state.pending_status_indicator_restore = false;
@@ -207,6 +209,8 @@ impl ChatWidget {
         };
         self.clear_safety_buffering();
         self.update_task_running_state();
+        self.output_rate.reset();
+        self.bottom_pane.update_output_rate(None);
         self.running_commands.clear();
         self.suppressed_exec_calls.clear();
         self.last_unified_wait = None;

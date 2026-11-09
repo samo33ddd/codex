@@ -1831,6 +1831,15 @@ impl BottomPane {
         }
     }
 
+    /// Update the estimated model output speed shown inside the active status
+    /// row. Pass `None` to hide it.
+    pub(crate) fn update_output_rate(&mut self, tokens_per_second: Option<f64>) {
+        if let Some(status) = self.status.as_mut() {
+            status.update_output_rate(tokens_per_second);
+            self.request_redraw();
+        }
+    }
+
     pub(crate) fn composer_is_empty(&self) -> bool {
         self.composer.is_empty()
     }

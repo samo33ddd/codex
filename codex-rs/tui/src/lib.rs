@@ -223,6 +223,7 @@ mod startup_orchestration;
 mod startup_preflight;
 mod startup_presentation;
 mod startup_recovery;
+mod output_rate;
 mod status;
 mod status_indicator_widget;
 mod streaming;

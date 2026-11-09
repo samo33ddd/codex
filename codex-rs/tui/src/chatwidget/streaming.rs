@@ -305,6 +305,7 @@ impl ChatWidget {
         if self.active_mode_kind() != ModeKind::Plan {
             return;
         }
+        self.record_output_delta(&delta);
         if !self.transcript.plan_item_active {
             self.transcript.plan_item_active = true;
             self.transcript.plan_delta_buffer.clear();
@@ -421,6 +422,7 @@ impl ChatWidget {
     pub(super) fn on_agent_reasoning_delta(&mut self, delta: String) {
         // Accumulate the current reasoning block for history and activity text.
         self.reasoning_buffer.push_str(&delta);
+        self.record_output_delta(&delta);
 
         if self.safety_buffering_is_waiting() {
             return;
@@ -719,6 +721,7 @@ impl ChatWidget {
 
     #[inline]
     pub(super) fn handle_streaming_delta(&mut self, delta: String) {
+        self.record_output_delta(&delta);
         if !delta.is_empty() {
             self.mark_safety_buffering_agent_message_started();
         }
@@ -757,6 +760,16 @@ impl ChatWidget {
             self.app_event_tx.send(AppEvent::StartCommitAnimation);
             self.run_catch_up_commit_tick();
         }
+    }
+
+    /// Feed streamed output into the rolling tok/s estimate and refresh the
+    /// status-row indicator. Called by every text-delta path.
+    fn record_output_delta(&mut self, delta: &str) {
+        let chars = delta.chars().count();
+        let now = Instant::now();
+        self.output_rate.record(chars, now);
+        self.bottom_pane
+            .update_output_rate(self.output_rate.tokens_per_second(now));
     }
 
     pub(super) fn active_cell_is_stream_tail(&self) -> bool {
